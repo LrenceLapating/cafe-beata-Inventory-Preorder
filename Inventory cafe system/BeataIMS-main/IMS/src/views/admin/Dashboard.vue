@@ -61,7 +61,7 @@
                     <div class="product-rank">#{{ index + 1 }}</div>
                     <div class="product-image-container">
                       <img 
-                        :src="product.image_url || 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3ENo%20Image%3C%2Ftext%3E%3C%2Fsvg%3E'" 
+                        :src="product.image_url" 
                         :alt="product.name"
                         class="product-image"
                         @error="onImageError"
@@ -165,6 +165,8 @@ import Chart from 'chart.js/auto';
       predictedProducts: [],
       nextMonthName: '',
       nextMonthYear: 0,
+      dataRefreshInterval: null,
+      lastCheckTimestamp: null,
     }
   },
   mounted() {
@@ -182,8 +184,44 @@ import Chart from 'chart.js/auto';
     
     // Fetch all required data
     this.fetchDashboardData();
+    
+    // Set up an interval to check for localStorage updates every 2 seconds
+    this.dataRefreshInterval = setInterval(() => {
+      this.checkForDataUpdates();
+    }, 2000);
+  },
+  beforeUnmount() {
+    if (this.dataRefreshInterval) {
+      clearInterval(this.dataRefreshInterval);
+    }
   },
   methods: {
+    // Check for updates in localStorage
+    checkForDataUpdates() {
+      const storedTimestamp = localStorage.getItem('topProductsTimestamp');
+      if (storedTimestamp && (!this.lastCheckTimestamp || storedTimestamp > this.lastCheckTimestamp)) {
+        // There's new data, update it
+        this.lastCheckTimestamp = storedTimestamp;
+        
+        const storedTopProducts = localStorage.getItem('topProductsData');
+        if (storedTopProducts) {
+          try {
+            const parsedData = JSON.parse(storedTopProducts);
+            if (parsedData && Array.isArray(parsedData) && parsedData.length > 0) {
+              console.log('Dashboard: Detected new top products data from Forecasting page');
+              this.topProducts = parsedData;
+              
+              // Update prediction data based on new top products
+              this.generatePredictionData();
+              this.renderPredictionChart();
+            }
+          } catch (e) {
+            console.error('Error parsing stored top products:', e);
+          }
+        }
+      }
+    },
+    
     // Fetch all dashboard data
     async fetchDashboardData() {
       this.isLoading = true;
@@ -246,50 +284,14 @@ import Chart from 'chart.js/auto';
       
       // Total Products
       this.totalProducts = 94;
-      this.productsChangePercent = '0.0';
+      this.productsChangePercent = '+12.4';
       
       // Stock Alerts
-      this.lowStockCount = 6;
+      this.lowStockCount = 5;
       this.outOfStockCount = 2;
       
-      // Top Products (using dummy data that matches the visuals)
-      this.topProducts = [
-        { 
-          name: 'Iemuel', 
-          totalSales: 132411, 
-          quantity: 57, 
-          orders: 4,
-          image_url: 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3EIemuel%3C%2Ftext%3E%3C%2Fsvg%3E'
-        },
-        { 
-          name: 'Chicken', 
-          totalSales: 5000, 
-          quantity: 20, 
-          orders: 1,
-          image_url: 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3EChicken%3C%2Ftext%3E%3C%2Fsvg%3E'
-        },
-        { 
-          name: 'Ice Spanish Latte', 
-          totalSales: 1035, 
-          quantity: 9, 
-          orders: 2,
-          image_url: 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3ELatte%3C%2Ftext%3E%3C%2Fsvg%3E'
-        },
-        { 
-          name: 'Pandan Frappe', 
-          totalSales: 980, 
-          quantity: 11, 
-          orders: 11,
-          image_url: 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3EFrappe%3C%2Ftext%3E%3C%2Fsvg%3E'
-        },
-        { 
-          name: 'Ube Frappe', 
-          totalSales: 630, 
-          quantity: 7, 
-          orders: 7,
-          image_url: 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3EUbe%3C%2Ftext%3E%3C%2Fsvg%3E'
-        }
-      ];
+      // Use the same demo top products as in other methods
+      this.useDemoTopProducts();
     },
     
     // Fetch today's sales data
@@ -430,56 +432,224 @@ import Chart from 'chart.js/auto';
     // Fetch top products for the current month
     async fetchTopProducts() {
       try {
-        // For demo purposes, just use fallback data to avoid API errors
-        // This would normally try to fetch data from the API
+        // This implements the same data fetching approach as Forecasting.vue
+        const currentMonth = new Date().getMonth(); // 0-11
+        const currentYear = new Date().getFullYear();
         
-        // Instead of making API calls, use hardcoded data that matches what's shown
-        this.topProducts = [
-          { 
-            name: 'Iemuel', 
-            totalSales: 132411, 
-            quantity: 57, 
-            orders: 4,
-            image_url: 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3EIemuel%3C%2Ftext%3E%3C%2Fsvg%3E'
-          },
-          { 
-            name: 'Chicken', 
-            totalSales: 5000, 
-            quantity: 20, 
-            orders: 1,
-            image_url: 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3EChicken%3C%2Ftext%3E%3C%2Fsvg%3E'
-          },
-          { 
-            name: 'Ice Spanish Latte', 
-            totalSales: 1035, 
-            quantity: 9, 
-            orders: 2,
-            image_url: 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3ELatte%3C%2Ftext%3E%3C%2Fsvg%3E'
-          },
-          { 
-            name: 'Pandan Frappe', 
-            totalSales: 980, 
-            quantity: 11, 
-            orders: 11,
-            image_url: 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3EFrappe%3C%2Ftext%3E%3C%2Fsvg%3E'
-          },
-          { 
-            name: 'Ube Frappe', 
-            totalSales: 630, 
-            quantity: 7, 
-            orders: 7,
-            image_url: 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3EUbe%3C%2Ftext%3E%3C%2Fsvg%3E'
+        try {
+          // Try to get all completed orders for data processing
+          const ordersResponse = await axios.get(`http://localhost:8000/orders?status=completed`, {
+            timeout: 10000
+          });
+          
+          if (ordersResponse.data && ordersResponse.data.orders && Array.isArray(ordersResponse.data.orders)) {
+            console.log(`Got ${ordersResponse.data.orders.length} completed orders from the database`);
+            
+            // Process orders into product sales data
+            this.processOrdersIntoTopProducts(ordersResponse.data.orders);
+            return;
           }
-        ];
+          
+          // If we couldn't get orders data, fall back to demo data
+          throw new Error('No order data found');
+        } catch (apiError) {
+          console.log('API request failed, using demo data');
+          this.useDemoTopProducts();
+        }
       } catch (error) {
-        // Just use fallback data without logging errors
-        this.useFallbackData();
+        console.error('Error fetching top products:', error);
+        this.useDemoTopProducts();
       }
     },
     
-    // Handle image loading errors
+    // Process orders data into top products - exact same as in Forecasting.vue
+    processOrdersIntoTopProducts(orders) {
+      // Group orders by month
+      const productSalesByMonth = Array(12).fill().map(() => ({}));
+      
+      // Get current month for filtering top products
+      const currentMonth = new Date().getMonth(); // 0-11
+      const currentYear = new Date().getFullYear();
+      
+      // Process each order
+      orders.forEach(order => {
+        if (!order.created_at) return; // Skip orders without creation date
+        
+        // Ensure we're working with a proper date object
+        const orderDate = new Date(order.created_at);
+        if (isNaN(orderDate.getTime())) {
+          console.warn(`Invalid date for order ${order.id}: ${order.created_at}`);
+          return; // Skip invalid dates
+        }
+        
+        const month = orderDate.getMonth(); // 0-11
+        const day = orderDate.getDate();
+        const year = orderDate.getFullYear();
+        
+        // Only process orders from the current year
+        if (year !== currentYear) {
+          console.log(`Skipping order from different year: ${year} (current: ${currentYear})`);
+          return;
+        }
+        
+        // Calculate total for this order
+        if (order.items && Array.isArray(order.items)) {
+          order.items.forEach(item => {
+            const price = parseFloat(item.price) || 0;
+            const quantity = parseInt(item.quantity) || 0;
+            const itemTotal = price * quantity;
+            
+            // Track individual product sales by month
+            const productName = item.name || 'Unknown Product';
+            if (!productSalesByMonth[month][productName]) {
+              productSalesByMonth[month][productName] = {
+                name: productName,
+                totalSales: 0,
+                quantity: 0,
+                orders: 0,
+                daysWithData: 30, // Default value
+                // Get image URL
+                image_url: this.determineProductImageUrl(item, productName)
+              };
+            }
+            productSalesByMonth[month][productName].totalSales += itemTotal;
+            productSalesByMonth[month][productName].quantity += quantity;
+            productSalesByMonth[month][productName].orders += 1;
+          });
+        }
+      });
+      
+      // Process top products for current month only
+      this.processTopProducts(productSalesByMonth[currentMonth], currentMonth);
+    },
+    
+    // Use demo top products that exactly match the Forecasting.vue demo products
+    useDemoTopProducts() {
+      // First check if there's stored data from Forecasting page
+      const storedTopProducts = localStorage.getItem('topProductsData');
+      if (storedTopProducts) {
+        try {
+          // Parse the stored data
+          const parsedData = JSON.parse(storedTopProducts);
+          if (parsedData && Array.isArray(parsedData) && parsedData.length > 0) {
+            console.log('Using stored top products data from Forecasting page:', parsedData);
+            this.topProducts = parsedData;
+            return;
+          }
+        } catch (e) {
+          console.error('Error parsing stored top products:', e);
+        }
+      }
+      
+      // If no stored data or parsing failed, use the default demo data
+      const currentMonth = new Date().getMonth();
+      
+      // Create demo products with sample data - same as Forecasting.vue
+      const productData = [
+        { name: 'lors', totalSales: 445000.00, quantity: 89, orders: 1, daysWithData: 30 },
+        { name: 'Iemuel', totalSales: 132411.00, quantity: 57, orders: 4, daysWithData: 30 },
+        { name: 'Chicken', totalSales: 5000.00, quantity: 20, orders: 1, daysWithData: 30 },
+        { name: 'Ice Spanish Latte', totalSales: 1035.00, quantity: 9, orders: 2, daysWithData: 30 },
+        { name: 'Pandan Frappe', totalSales: 980.00, quantity: 11, orders: 11, daysWithData: 30 },
+        { name: 'Ube Frappe', totalSales: 630.00, quantity: 7, orders: 7, daysWithData: 30 }
+      ];
+      
+      // Convert to object structure for processTopProducts
+      const demoProducts = {};
+      productData.forEach(product => {
+        // Add image URL
+        product.image_url = this.determineProductImageUrl({ name: product.name }, product.name);
+        demoProducts[product.name] = product;
+      });
+      
+      // Process top products with this demo data
+      this.processTopProducts(demoProducts, currentMonth);
+    },
+    
+    // Process top products (identical to Forecasting.vue)
+    processTopProducts(productSales, month) {
+      // Get month name for display
+      const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+      this.currentMonthName = monthNames[month];
+      
+      // Set next month name
+      const nextMonth = (month + 1) % 12;
+      this.nextMonthName = monthNames[nextMonth];
+      
+      // Convert product sales object to array
+      const productsArray = Object.values(productSales || {});
+      
+      // Sort by total sales (highest first)
+      productsArray.sort((a, b) => b.totalSales - a.totalSales);
+      
+      // Take the top 5 products
+      this.topProducts = productsArray.slice(0, 5);
+      
+      // Store the data in localStorage so Forecasting page can use it
+      localStorage.setItem('topProductsData', JSON.stringify(this.topProducts));
+      localStorage.setItem('topProductsTimestamp', new Date().toISOString());
+      
+      // Log for debugging
+      if (this.topProducts.length > 0) {
+        console.log(`Top 5 Products for ${this.currentMonthName}:`, this.topProducts);
+      } else {
+        console.log(`No product data for ${this.currentMonthName}`);
+      }
+      
+      // Continue with prediction data
+      this.generatePredictionData();
+    },
+    
+    // Determine the image URL for a product (identical to Forecasting.vue)
+    determineProductImageUrl(item, productName) {
+      // Check for direct image properties first
+      if (item && item.image_url && item.image_url.includes('http')) {
+        return item.image_url;
+      }
+      
+      if (item && item.image && item.image.includes('http')) {
+        return item.image;
+      }
+      
+      // Format the product name for URL use
+      const productNameStr = productName || (item ? item.name : '') || '';
+      
+      // Get initial letter for the SVG
+      const initial = productNameStr.charAt(0).toUpperCase();
+      
+      // Generate color based on product name for consistency
+      const colors = [
+        '#2c7be5', // Blue
+        '#00d97e', // Green
+        '#f6c343', // Yellow
+        '#e63757', // Red
+        '#6b5eae', // Purple
+        '#a85a32', // Brown
+        '#4a90e2', // Light blue
+        '#43a047'  // Matcha green
+      ];
+      
+      // Simple hash function for name
+      let hash = 0;
+      for (let i = 0; i < productNameStr.length; i++) {
+        hash = productNameStr.charCodeAt(i) + ((hash << 5) - hash);
+      }
+      
+      const bgColor = colors[Math.abs(hash) % colors.length];
+      
+      // Generate an SVG with the product's initial and consistent background color
+      // Using direct color values instead of encoding for better readability
+      return `data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64'%3E%3Crect fill='${bgColor}' width='64' height='64'/%3E%3Ctext fill='white' font-family='Arial,Sans-serif' font-size='28' font-weight='bold' text-anchor='middle' x='32' y='42'%3E${initial}%3C/text%3E%3C/svg%3E`;
+    },
+    
+    // Handle image loading errors (as a backup)
     onImageError(event) {
-      event.target.src = 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3ENo%20Image%3C%2Ftext%3E%3C%2Fsvg%3E';
+      // Get the product name from the alt attribute
+      const productName = event.target.alt || 'Product';
+      const initial = productName.charAt(0).toUpperCase();
+      
+      // Use a simple generic SVG as fallback
+      event.target.src = `data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64'%3E%3Crect fill='%23cccccc' width='64' height='64'/%3E%3Ctext fill='white' font-family='Arial,Sans-serif' font-size='28' font-weight='bold' text-anchor='middle' x='32' y='42'%3E${initial}%3C/text%3E%3C/svg%3E`;
     },
     
     // Calculate bar width as percentage of max sales - similar to Forecasting.vue

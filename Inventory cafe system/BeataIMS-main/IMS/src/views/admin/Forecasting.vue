@@ -166,6 +166,14 @@ export default {
   mounted() {
     this.loading = true;
     
+    // Check if there's a test mode flag in the URL for demo purposes
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('demo') === 'true') {
+      // Use demo data directly
+      this.createDemoData();
+      return;
+    }
+  
     // Only fetch real data, with no demo data fallback
     this.fetchRealSalesData()
       .then(() => {
@@ -340,33 +348,43 @@ export default {
     // Determine the image URL for a product
     determineProductImageUrl(item, productName) {
       // Check for direct image properties first
-      if (item.image_url && item.image_url.includes('http')) {
+      if (item && item.image_url && item.image_url.includes('http')) {
         return item.image_url;
       }
       
-      if (item.image && item.image.includes('http')) {
+      if (item && item.image && item.image.includes('http')) {
         return item.image;
       }
       
-      // Try different image path formats used in the system
-      const baseUrl = 'http://localhost:8000';
-      const inventoryBaseUrl = 'http://localhost:8001';
+      // Format the product name for URL use
+      const productNameStr = productName || (item ? item.name : '') || '';
       
-      // Format the product name for URL use - remove spaces, lowercase
-      const formattedName = productName.toLowerCase().replace(/\s+/g, '_');
+      // Get initial letter for the SVG
+      const initial = productNameStr.charAt(0).toUpperCase();
       
-      // Check for common cafe product naming patterns
-      if (productName.toLowerCase().includes('coffee') || 
-          productName.toLowerCase().includes('latte') || 
-          productName.toLowerCase().includes('frappe') ||
-          productName.toLowerCase().includes('tea') ||
-          productName.toLowerCase().includes('matcha')) {
-        // For cafe items, try cafe system paths first
-        return `${baseUrl}/uploads/menu_items/${formattedName}.jpg`;
+      // Generate color based on product name for consistency
+      const colors = [
+        '#2c7be5', // Blue
+        '#00d97e', // Green
+        '#f6c343', // Yellow
+        '#e63757', // Red
+        '#6b5eae', // Purple
+        '#a85a32', // Brown
+        '#4a90e2', // Light blue
+        '#43a047'  // Matcha green
+      ];
+      
+      // Simple hash function for name
+      let hash = 0;
+      for (let i = 0; i < productNameStr.length; i++) {
+        hash = productNameStr.charCodeAt(i) + ((hash << 5) - hash);
       }
       
-      // For other inventory items
-      return `${inventoryBaseUrl}/uploads/products/${formattedName}.jpg`;
+      const bgColor = colors[Math.abs(hash) % colors.length];
+      
+      // Generate an SVG with the product's initial and consistent background color
+      // Using direct color values instead of encoding for better readability
+      return `data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64'%3E%3Crect fill='${bgColor}' width='64' height='64'/%3E%3Ctext fill='white' font-family='Arial,Sans-serif' font-size='28' font-weight='bold' text-anchor='middle' x='32' y='42'%3E${initial}%3C/text%3E%3C/svg%3E`;
     },
     
     // Initialize with empty data for current year
@@ -392,8 +410,27 @@ export default {
         });
       }
       
-      // Empty top products array
-      this.topProducts = [];
+      // Check if we have stored top products data
+      const storedTopProducts = localStorage.getItem('topProductsData');
+      if (storedTopProducts) {
+        try {
+          // Parse the stored data
+          const parsedData = JSON.parse(storedTopProducts);
+          if (parsedData && Array.isArray(parsedData) && parsedData.length > 0) {
+            console.log('Using stored top products data:', parsedData);
+            this.topProducts = parsedData;
+          } else {
+            // Empty top products array if no valid stored data
+            this.topProducts = [];
+          }
+        } catch (e) {
+          console.error('Error parsing stored top products:', e);
+          this.topProducts = [];
+        }
+      } else {
+        // Empty top products array if no stored data
+        this.topProducts = [];
+      }
       
       // Reset current month data
       this.currentMonthSales = 0;
@@ -526,7 +563,7 @@ export default {
       }).format(value);
     },
     
-    // Add a new method to process top products for a specific month
+    // Process top products for a specific month
     processTopProducts(productSales, month) {
       // Get month name for display
       const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -544,6 +581,10 @@ export default {
       
       // Take the top 5 products
       this.topProducts = productsArray.slice(0, 5);
+      
+      // Store the data in localStorage so Dashboard page can use it too
+      localStorage.setItem('topProductsData', JSON.stringify(this.topProducts));
+      localStorage.setItem('topProductsTimestamp', new Date().toISOString());
       
       // Log for debugging
       if (this.topProducts.length > 0) {
@@ -809,9 +850,14 @@ export default {
       });
     },
     
-    // Method to handle image loading errors
+    // Method to handle image loading errors (as a backup)
     onImageError(event) {
-      event.target.src = 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3ENo%20Image%3C%2Ftext%3E%3C%2Fsvg%3E';
+      // Get the product name from the alt attribute
+      const productName = event.target.alt || 'Product';
+      const initial = productName.charAt(0).toUpperCase();
+      
+      // Use a simple generic SVG as fallback
+      event.target.src = `data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64'%3E%3Crect fill='%23cccccc' width='64' height='64'/%3E%3Ctext fill='white' font-family='Arial,Sans-serif' font-size='28' font-weight='bold' text-anchor='middle' x='32' y='42'%3E${initial}%3C/text%3E%3C/svg%3E`;
     },
     
     // Calculate bar width as percentage of max sales
@@ -835,6 +881,62 @@ export default {
       ];
       
       return colors[index % colors.length];
+    },
+    
+    // Create demo data for testing
+    createDemoData() {
+      // Set current month
+      const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+      const currentMonth = new Date().getMonth();
+      this.currentMonthName = monthNames[currentMonth];
+      
+      // Create demo products with sample data
+      const productData = [
+        { name: 'lors', totalSales: 445000.00, quantity: 89, orders: 1, daysWithData: 30 },
+        { name: 'Iemuel', totalSales: 132411.00, quantity: 57, orders: 4, daysWithData: 30 },
+        { name: 'Chicken', totalSales: 5000.00, quantity: 20, orders: 1, daysWithData: 30 },
+        { name: 'Ice Spanish Latte', totalSales: 1035.00, quantity: 9, orders: 2, daysWithData: 30 },
+        { name: 'Pandan Frappe', totalSales: 980.00, quantity: 11, orders: 11, daysWithData: 30 },
+        { name: 'Ube Frappe', totalSales: 630.00, quantity: 7, orders: 7, daysWithData: 30 }
+      ];
+      
+      // Convert to object structure for processTopProducts
+      const demoProducts = {};
+      productData.forEach(product => {
+        // Add image URL
+        product.image_url = this.determineProductImageUrl({ name: product.name }, product.name);
+        demoProducts[product.name] = product;
+      });
+      
+      // Process these products
+      this.processTopProducts(demoProducts, currentMonth);
+      
+      // Generate monthly data
+      this.monthlyData = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].map((month, index) => {
+        // Generate random sales data
+        const sales = index === currentMonth ? 500000 : Math.random() * 400000;
+        return {
+          month,
+          sales,
+          daysWithData: 30,
+          orderCount: Math.round(sales / 5000) // Rough estimate for demo
+        };
+      });
+      
+      // Calculate statistics
+      this.calculateStatistics();
+      
+      // Set loading to false
+      this.loading = false;
+      
+      // Render the chart
+      this.$nextTick(() => {
+        setTimeout(() => {
+          this.renderMonthlySalesChart();
+        }, 300);
+      });
+      
+      this.toast.success('Demo data loaded successfully');
     },
   }
 };
@@ -1173,5 +1275,19 @@ export default {
   font-size: 0.8rem;
   border-top: 1px solid #eee;
   margin-top: 5px;
+}
+
+/* Add this at the top of your existing styles */
+.refresh-button {
+  cursor: pointer;
+  font-size: 14px;
+  margin-left: 10px;
+  color: #888;
+  vertical-align: middle;
+  transition: color 0.3s;
+}
+
+.refresh-button:hover {
+  color: #2c7be5;
 }
 </style> 
