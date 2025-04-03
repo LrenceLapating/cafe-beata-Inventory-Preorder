@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import List, Optional, Dict
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from model.db import get_db, db_connection
 from datetime import datetime, timedelta
@@ -622,3 +622,83 @@ async def update_sales_product_details(db=Depends(get_db)):
         db.rollback()
         logger.error(f"Error updating sales product details: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+# Direct SQL Query Model for reporting
+class SQLQueryRequest(BaseModel):
+    query: str
+    read_only: bool = True  # Must be read-only for security
+
+@SalesRouter.post("/execute-sql", response_model=List[Dict[str, Any]])
+async def execute_read_only_sql(query_request: SQLQueryRequest, db=Depends(get_db)):
+    """Execute a read-only SQL query for reporting purposes"""
+    # Security check - reject any queries that aren't read-only
+    query = query_request.query.strip().lower()
+    
+    # Basic security check - only allow SELECT statements
+    if not query.startswith('select '):
+        raise HTTPException(status_code=400, detail="Only SELECT queries are allowed")
+    
+    # Check for dangerous operations
+    dangerous_operations = ['delete', 'update', 'insert', 'drop', 'alter', 'truncate', 'create', 'replace']
+    if any(op in query for op in dangerous_operations):
+        raise HTTPException(status_code=400, detail="Query contains dangerous operations")
+    
+    try:
+        cursor = db.cursor(dictionary=True)
+        cursor.execute(query)
+        results = cursor.fetchall()
+        cursor.close()
+        
+        # Convert any Decimal objects to float for JSON serialization
+        processed_results = []
+        for row in results:
+            processed_row = {}
+            for key, value in row.items():
+                if isinstance(value, datetime):
+                    processed_row[key] = value.isoformat()
+                else:
+                    processed_row[key] = value
+            processed_results.append(processed_row)
+            
+        return processed_results
+    except Exception as e:
+        logger.error(f"Error executing SQL query: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error executing query: {str(e)}")
+
+@SalesRouter.get("/raw", response_model=List[Dict])
+async def get_raw_sales_data(
+    year: Optional[int] = Query(None, description="Filter by year"),
+    limit: int = Query(5000, ge=1, le=10000, description="Maximum number of records to return"),
+    db = Depends(get_db)
+):
+    """Get raw sales data with optional year filter"""
+    try:
+        cursor = db.cursor(dictionary=True)
+        
+        # Set filter conditions based on params
+        current_year = datetime.now().year
+        target_year = year if year is not None else current_year
+        
+        # Get raw sales data for the specified year
+        cursor.execute("""
+            SELECT 
+                id, product_id, product_name, quantity_sold, 
+                unit_price, remitted, created_at
+            FROM sales
+            WHERE YEAR(created_at) = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, (target_year, limit))
+        
+        sales_data = cursor.fetchall()
+        cursor.close()
+        
+        # Convert datetime objects to ISO format strings for JSON
+        for row in sales_data:
+            if 'created_at' in row and row['created_at']:
+                row['created_at'] = row['created_at'].isoformat()
+        
+        return sales_data
+    except Exception as e:
+        logger.error(f"Error getting raw sales data: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")

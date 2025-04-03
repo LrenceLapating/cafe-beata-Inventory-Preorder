@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query 
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from model.db import get_db
 import traceback
 import logging
 import mysql.connector
+import calendar
 
 # Set up logger
 logger = logging.getLogger("inventory-system-backend")
@@ -433,3 +434,121 @@ async def get_debug_zero_stock(db = Depends(get_db)):
             "zero_items": [],
             "all_items_sample": []
         }
+
+@ReportRouter.get("/monthly-sales", response_model=List[Dict])
+async def get_monthly_sales(
+    year: Optional[int] = Query(None, description="Filter by year (e.g., 2023)"),
+    db = Depends(get_db)
+):
+    """Get sales data aggregated by month for the specified year or current year if not specified"""
+    try:
+        cursor = db.cursor(dictionary=True)
+        
+        # If year not specified, use current year
+        current_year = datetime.now().year
+        target_year = year if year is not None else current_year
+        
+        # Get sales data aggregated by month
+        cursor.execute("""
+            SELECT 
+                MONTH(created_at) as month_num,
+                MONTHNAME(created_at) as month_name, 
+                SUM(remitted) as total_sales,
+                COUNT(DISTINCT DATE(created_at)) as day_count
+            FROM sales
+            WHERE YEAR(created_at) = %s
+            GROUP BY MONTH(created_at), MONTHNAME(created_at)
+            ORDER BY MONTH(created_at)
+        """, (target_year,))
+        
+        monthly_data = cursor.fetchall()
+        cursor.close()
+        
+        # If no data found for the requested year, return empty list
+        if not monthly_data:
+            logger.info(f"No monthly sales data found for year {target_year}")
+            return []
+        
+        # Format the response with month abbreviations
+        month_abbr = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        result = []
+        
+        for row in monthly_data:
+            # Get month index (1-12) and subtract 1 to get array index (0-11)
+            month_idx = row['month_num'] - 1
+            
+            result.append({
+                "month": month_abbr[month_idx],
+                "month_name": row['month_name'],
+                "total_sales": float(row['total_sales']),
+                "day_count": row['day_count']
+            })
+        
+        # Fill in missing months with zero values
+        all_months = []
+        for i in range(12):
+            month_exists = False
+            for m in result:
+                if m['month'] == month_abbr[i]:
+                    all_months.append(m)
+                    month_exists = True
+                    break
+            
+            if not month_exists:
+                # Only add months up to current month for current year
+                if target_year < current_year or (i + 1) <= datetime.now().month:
+                    all_months.append({
+                        "month": month_abbr[i],
+                        "month_name": calendar.month_name[i+1],
+                        "total_sales": 0.0,
+                        "day_count": 0
+                    })
+        
+        return all_months
+        
+    except Exception as e:
+        logger.error(f"Error getting monthly sales: {traceback.format_exc()}")
+        return []
+
+@ReportRouter.get("/daily-all", response_model=List[Dict])
+async def get_all_daily_sales(
+    days: int = Query(365, ge=1, le=1000, description="Number of days to retrieve"),
+    db = Depends(get_db)
+):
+    """Get daily sales data for the last specified number of days"""
+    try:
+        cursor = db.cursor(dictionary=True)
+        
+        # Calculate date range
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=days)
+        
+        # Get daily sales totals
+        cursor.execute("""
+            SELECT 
+                DATE(created_at) as date,
+                SUM(remitted) as total_remitted,
+                COUNT(*) as transaction_count
+            FROM sales
+            WHERE DATE(created_at) BETWEEN %s AND %s
+            GROUP BY DATE(created_at)
+            ORDER BY date DESC
+        """, (start_date, end_date))
+        
+        daily_data = cursor.fetchall()
+        cursor.close()
+        
+        # Format the response
+        result = []
+        for row in daily_data:
+            result.append({
+                "date": row['date'].strftime('%Y-%m-%d'),
+                "total_remitted": float(row['total_remitted']),
+                "transaction_count": row['transaction_count']
+            })
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error getting all daily sales: {traceback.format_exc()}")
+        return []
