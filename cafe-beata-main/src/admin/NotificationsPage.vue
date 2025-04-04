@@ -59,6 +59,12 @@
       <!-- Add the top bar with pink gradient at the very top -->
       <div class="top-bar">
         <div class="centered-content">
+          <!-- Add sidebar button to the top bar -->
+          <button class="menu-button-header" @click="toggleSidebar">
+            <div class="menu-icon-container">
+              <i class="fa fa-bars"></i>
+            </div>
+          </button>
           <div class="logo-container">
             <div class="cafe-title">Cafe Preorder Admin Dashboard</div>
           </div>
@@ -1107,14 +1113,14 @@ export default {
 .centered-content {
   display: flex;
   align-items: center;
-  justify-content: center;
-  flex-grow: 1;
+  justify-content: flex-start;
+  padding: 0 0 0 5px; /* Reduce left padding to move button closer to edge */
+  height: 100%;
 }
 
 .logo-container {
   display: flex;
   align-items: center;
-  flex-shrink: 0;
 }
 
 .cafe-title {
@@ -1139,6 +1145,7 @@ export default {
   cursor: pointer;
   transition: all 0.3s ease-in-out;
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  display: none; /* Hide the floating button */
 }
 
 .menu-button:hover {
@@ -2172,5 +2179,26 @@ button.decline-btn:hover {
 
 .dark-mode .category-filter:hover {
   border-color: #f8c6d0;
+}
+
+/* Add styles for the new header menu button */
+.menu-button-header {
+  background: #d12f7a;
+  color: white;
+  padding: 8px 12px;
+  font-size: 18px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.3s ease-in-out;
+  margin-right: 15px;
+  margin-left: 0; /* Ensure no left margin */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.menu-button-header:hover {
+  background: #b82d67;
 }
 </style>

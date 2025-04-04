@@ -702,3 +702,75 @@ async def get_raw_sales_data(
     except Exception as e:
         logger.error(f"Error getting raw sales data: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+@SalesRouter.get("/top-products", response_model=List[Dict])
+async def get_top_products(
+    month: Optional[int] = Query(None, description="Month (1-12)"),
+    year: Optional[int] = Query(None, description="Year"),
+    limit: int = Query(10, ge=1, le=50, description="Number of top products to return"),
+    db = Depends(get_db)
+):
+    """Get top selling products based on sales data"""
+    try:
+        cursor = db.cursor(dictionary=True)
+        
+        # Set default month/year to current if not specified
+        current_date = datetime.now()
+        target_month = month if month is not None else current_date.month
+        target_year = year if year is not None else current_date.year
+        
+        # Build query
+        query = """
+            SELECT 
+                s.product_id,
+                COALESCE(s.product_name, p.ProductName, CONCAT('Product ID: ', s.product_id)) as product_name,
+                COALESCE(s.Image, p.Image) as image_url,
+                SUM(s.quantity_sold) as total_quantity,
+                SUM(s.remitted) as total_sales,
+                COUNT(DISTINCT DATE(s.created_at)) as days_with_sales,
+                COUNT(*) as order_count
+            FROM sales s
+            LEFT JOIN inventoryproduct p ON s.product_id = p.id
+            WHERE 
+                YEAR(s.created_at) = %s
+                AND MONTH(s.created_at) = %s
+            GROUP BY 
+                s.product_id, product_name, image_url
+            ORDER BY 
+                total_sales DESC
+            LIMIT %s
+        """
+        
+        cursor.execute(query, (target_year, target_month, limit))
+        top_products = cursor.fetchall()
+        cursor.close()
+        
+        # Format the response with necessary fields
+        result = []
+        for product in top_products:
+            if product['total_sales'] > 0:
+                # Process image URL to ensure it's properly formatted
+                image_url = product['image_url']
+                if image_url:
+                    # If it's not already a full URL, format it properly
+                    if not image_url.startswith('http'):
+                        if image_url.startswith('/'):
+                            image_url = f"http://localhost:8001{image_url}"
+                        else:
+                            image_url = f"http://localhost:8001/uploads/products/{image_url}"
+                
+                result.append({
+                    "product_id": product['product_id'],
+                    "name": product['product_name'],
+                    "image_url": image_url,
+                    "totalSales": float(product['total_sales']),
+                    "quantity": int(product['total_quantity']),
+                    "orders": int(product['order_count']),
+                    "daysWithData": int(product['days_with_sales']),
+                    "source": "inventory"
+                })
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error getting top products: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")

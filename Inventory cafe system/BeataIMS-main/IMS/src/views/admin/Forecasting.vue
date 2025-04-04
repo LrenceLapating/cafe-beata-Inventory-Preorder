@@ -26,7 +26,12 @@
 
       <div class="charts-section">
         <div class="chart-card card">
-          <h3>Monthly Sales</h3>
+          <h3>
+            Monthly Sales
+            <span class="scale-toggle" @click="toggleChartScale">
+              {{ useLogScale ? 'Switch to Normal Scale' : 'Switch to Log Scale' }}
+            </span>
+          </h3>
           <div class="chart-container">
             <canvas ref="monthlySalesChart"></canvas>
           </div>
@@ -52,7 +57,7 @@
                   <div class="product-rank">#{{ index + 1 }}</div>
                   <div class="product-image-container">
                     <img 
-                      :src="product.image_url || 'data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20fill%3D%22%23eee%22%20width%3D%2264%22%20height%3D%2264%22%2F%3E%3Ctext%20fill%3D%22%23999%22%20font-family%3D%22Arial%2CSans-serif%22%20font-size%3D%2210%22%20text-anchor%3D%22middle%22%20x%3D%2232%22%20y%3D%2232%22%3ENo%20Image%3C%2Ftext%3E%3C%2Fsvg%3E'" 
+                      :src="product.fallback_image || getFixedImageUrl(product)"
                       :alt="product.name"
                       class="product-image"
                       @error="onImageError"
@@ -60,7 +65,11 @@
           </div>
                   <div class="product-info">
                     <div class="product-name-container">
-                      <span class="product-name">{{ product.name }}</span>
+                      <span class="product-name">
+                        {{ cleanProductName(product.name || product.id || 'Product') }}
+                        <span v-if="product.name && product.name.startsWith('Unnamed')" class="unnamed-note">(ID: {{ product.id || 'Unknown' }})</span>
+                      </span>
+                      <span v-if="product.source === 'combined'" class="combined-badge">Combined</span>
         </div>
                     <div class="bar-container">
                       <div class="product-bar" :style="{ width: calculateBarWidth(product.totalSales) + '%', backgroundColor: getBarColor(index) }"></div>
@@ -75,7 +84,7 @@
               </div>
             </div>
             <div class="data-source-info">
-              <p><small>Data source: Orders API - showing products for {{ currentMonthName }} {{ currentYear }}</small></p>
+              <p><small>Data source: Cafe Beata & Inventory Systems - showing combined products for {{ currentMonthName }} {{ currentYear }}</small></p>
             </div>
           </div>
           </div>
@@ -100,7 +109,7 @@
                 <div class="prediction-products">
                   <div v-for="(product, index) in predictedProducts" :key="product.name" class="prediction-product">
                     <span class="prediction-rank">#{{ index + 1 }}</span>
-                    <span class="prediction-name">{{ product.name }}</span>
+                    <span class="prediction-name">{{ cleanProductName(product.name) }}</span>
                     <span class="prediction-value">{{ formatCurrency(product.predictedSales) }}</span>
                   </div>
         </div>
@@ -113,7 +122,7 @@
               
               <div class="prediction-info">
                 <p>
-                  <small>Forecast methodology: Analysis of current sales patterns, product seasonality, and market trends.</small>
+                  <small>Forecast methodology: Analysis of current sales patterns, product seasonality, and market trends from both Cafe Beata and Inventory systems.</small>
                 </p>
               </div>
             </div>
@@ -132,6 +141,12 @@ import axios from 'axios';
 import { SALES_API, API_URL, REPORTS_API } from '@/api/config.js';
 import { useToast } from 'vue-toastification';
 import { nextTick } from 'vue';
+
+// Global Chart.js configuration
+Chart.defaults.font.family = "'Arial', sans-serif";
+Chart.defaults.color = '#555';
+Chart.defaults.responsive = true;
+Chart.defaults.maintainAspectRatio = false;
 
 export default {
   name: 'Forecasting',
@@ -161,6 +176,7 @@ export default {
       predictedProducts: [],
       nextMonthName: '',
       predictionsChart: null,
+      useLogScale: true, // Start with log scale by default
     };
   },
   mounted() {
@@ -179,13 +195,10 @@ export default {
       .then(() => {
         // Initialize UI with the data
         this.calculateStatistics();
+        this.preloadProductImages();
         
-        // Render charts after DOM is fully ready
-        nextTick(() => {
-          setTimeout(() => {
-            this.renderMonthlySalesChart();
-          }, 300);
-        });
+        // Safely initialize charts after data is loaded
+        this.safeInitializeCharts();
       })
       .catch(error => {
         console.error("Error initializing monthly sales data:", error);
@@ -200,27 +213,88 @@ export default {
     async fetchRealSalesData() {
       this.isLoading = true;
       try {
-        // Try direct query from daily sales report data - the most accurate source
-        console.log("Fetching real data from database...");
+        console.log("Fetching real data from both Cafe Beata and Inventory systems...");
         
-        // Try to get all completed orders
-        const ordersResponse = await axios.get(`http://localhost:8000/orders?status=completed`, {
+        // Get data from both systems
+        const cafePromise = axios.get(`http://localhost:8000/orders?status=completed`, {
           timeout: 10000
         });
         
-        if (ordersResponse.data && ordersResponse.data.orders && Array.isArray(ordersResponse.data.orders)) {
-          console.log(`Got ${ordersResponse.data.orders.length} completed orders from the database`);
+        const inventorySalesPromise = axios.get(`http://localhost:8001/api/sales/forecasting/historical-sales`, {
+          timeout: 10000
+        });
+        
+        // Also get top products from inventory system
+        const currentMonth = new Date().getMonth() + 1; // API expects 1-12 for months
+        const currentYear = new Date().getFullYear();
+        const inventoryProductsPromise = axios.get(
+          `http://localhost:8001/api/sales/top-products?month=${currentMonth}&year=${currentYear}&limit=10`, 
+          { timeout: 10000 }
+        );
+        
+        // Wait for all requests to complete
+        const [cafeResponse, inventorySalesResponse, inventoryProductsResponse] = 
+          await Promise.allSettled([cafePromise, inventorySalesPromise, inventoryProductsPromise]);
+        
+        // Process Cafe Beata data (if available)
+        let cafeOrders = [];
+        if (cafeResponse.status === 'fulfilled' && cafeResponse.value.data && 
+            cafeResponse.value.data.orders && Array.isArray(cafeResponse.value.data.orders)) {
+          console.log(`Got ${cafeResponse.value.data.orders.length} completed orders from Cafe Beata`);
+          cafeOrders = cafeResponse.value.data.orders;
+        } else {
+          console.log("Could not fetch data from Cafe Beata system or no orders found");
+        }
+        
+        // Process Inventory system sales data (if available)
+        let inventorySales = [];
+        if (inventorySalesResponse.status === 'fulfilled' && inventorySalesResponse.value.data && 
+            Array.isArray(inventorySalesResponse.value.data)) {
+          console.log(`Got ${inventorySalesResponse.value.data.length} days of sales data from Inventory system`);
+          inventorySales = inventorySalesResponse.value.data;
+        } else {
+          console.log("Could not fetch sales data from Inventory system or no sales found");
+        }
+        
+        // Process Inventory top products (if available)
+        let inventoryProducts = [];
+        if (inventoryProductsResponse.status === 'fulfilled' && inventoryProductsResponse.value.data && 
+            Array.isArray(inventoryProductsResponse.value.data)) {
+          console.log(`Got ${inventoryProductsResponse.value.data.length} top products from Inventory system`);
+          inventoryProducts = inventoryProductsResponse.value.data;
+        } else {
+          console.log("Could not fetch top products from Inventory system");
+        }
+        
+        // If we have data from any source, process it
+        if (cafeOrders.length > 0 || inventorySales.length > 0 || inventoryProducts.length > 0) {
+          // Process sales data from Inventory system first for the chart
+          if (inventorySales.length > 0) {
+            this.processInventorySalesData(inventorySales);
+          }
           
-          // Process these orders into monthly totals - using only real data
-          this.processOrdersIntoMonthlySales(ordersResponse.data.orders);
-          this.toast.success('Successfully loaded real sales data from orders');
+          // Use real inventory product data if available
+          const currentMonth = new Date().getMonth(); // 0-11
+          if (inventoryProducts.length > 0) {
+            this.processInventoryTopProducts(inventoryProducts, currentMonth);
+          }
+          
+          // Then process orders from Cafe Beata system
+          if (cafeOrders.length > 0) {
+            this.processOrdersIntoMonthlySales(cafeOrders, 'cafe');
+          }
+          
+          // Calculate statistics after processing all data
+          this.calculateStatistics();
+          this.preloadProductImages();
+          this.toast.success('Successfully loaded sales data from both systems');
           return;
         }
                 
-        // If we couldn't get orders data, initialize with empty data
-        console.log("No data from orders endpoint, showing empty data");
+        // If we couldn't get data from either system, initialize with empty data
+        console.log("No data from either system, showing empty data");
         this.initializeEmptyData();
-        this.toast.error('Could not find order data. Showing empty data.');
+        this.toast.error('Could not find sales data. Showing empty data.');
         return;
       } catch (error) {
         console.error("Failed to fetch real sales data:", error);
@@ -235,8 +309,8 @@ export default {
     },
     
     // Process orders data into monthly sales - using only real data
-    processOrdersIntoMonthlySales(orders) {
-      console.log("Processing real orders data into monthly sales...");
+    processOrdersIntoMonthlySales(orders, source = 'cafe') {
+      console.log(`Processing real orders data from ${source} into monthly sales...`);
       
       // Group orders by month
       const monthlyTotals = new Array(12).fill(0);
@@ -288,13 +362,14 @@ export default {
             const itemTotal = price * quantity;
             
             // Track individual product sales by month
-            const productName = item.name || 'Unknown Product';
+            const productName = item.name || `Unnamed Product (ID: ${item.id || 'Unknown'})`;
             if (!productSalesByMonth[month][productName]) {
               productSalesByMonth[month][productName] = {
                 name: productName,
                 totalSales: 0,
                 quantity: 0,
                 orders: 0,
+                source: source,
                 // Get image URL - try multiple possible sources and formats
                 image_url: this.determineProductImageUrl(item, productName)
               };
@@ -330,19 +405,245 @@ export default {
         }
       }
       
-      // Create the monthly data array with real values only
+      // Create or update the monthly data array with real values
+      if (!this.monthlyData || this.monthlyData.length === 0) {
       this.monthlyData = monthNames.map((month, index) => ({
         month: month,
         sales: monthlyTotals[index],
         daysWithData: daysWithData[index],
         orderCount: monthlyOrders[index]  // Store actual order count
       }));
+      } else {
+        // Add to existing data
+        for (let i = 0; i < 12; i++) {
+          this.monthlyData[i].sales += monthlyTotals[i];
+          this.monthlyData[i].orderCount += monthlyOrders[i];
+          this.monthlyData[i].daysWithData = Math.max(this.monthlyData[i].daysWithData, daysWithData[i]);
+        }
+      }
       
       // Process top products for current month only
-      this.processTopProducts(productSalesByMonth[currentMonth], currentMonth);
+      this.processTopProducts(productSalesByMonth[currentMonth], currentMonth, source);
+    },
+    
+    // Process real top products data from the inventory system
+    processInventoryTopProducts(products, month) {
+      console.log("Processing real top products from inventory system:", products);
       
-      // Calculate statistics based on real data
-      this.calculateStatistics();
+      // Get month name for display
+      const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+      this.currentMonthName = monthNames[month];
+      
+      // Set next month name
+      const nextMonth = (month + 1) % 12;
+      this.nextMonthName = monthNames[nextMonth];
+      
+      // Convert to format expected by the rest of the app
+      let unnamedCount = 0;
+      const formattedProducts = products.map(product => {
+        // Log original product for debugging
+        console.log("Raw product data:", product);
+        
+        // Try to find the product name from different possible fields
+        let name = null;
+        
+        // Check various common name fields
+        if (product.name && product.name.trim() !== '') {
+          name = product.name;
+        } else if (product.title && product.title.trim() !== '') {
+          name = product.title;
+        } else if (product.product_name && product.product_name.trim() !== '') {
+          name = product.product_name;
+        } else if (product.item_name && product.item_name.trim() !== '') {
+          name = product.item_name;
+        }
+        
+        // Try to extract name from image URL if no name is found but image URL exists
+        if (!name && product.image_url) {
+          try {
+            // Extract filename from URL
+            const urlParts = product.image_url.split('/');
+            let fileName = urlParts[urlParts.length - 1];
+            
+            // Remove extension
+            fileName = fileName.split('.')[0];
+            
+            // Replace underscores and hyphens with spaces
+            fileName = fileName.replace(/[_-]/g, ' ');
+            
+            // Capitalize each word
+            fileName = fileName.split(' ').map(word => 
+              word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+            ).join(' ');
+            
+            if (fileName) {
+              name = fileName;
+              console.log(`Extracted name from image URL: ${name}`);
+            }
+          } catch (e) {
+            console.error('Error extracting name from image URL:', e);
+          }
+        }
+        
+        // If still no name found, use unnamed product with incrementing number
+        if (!name) {
+          name = `Unnamed Product ${++unnamedCount}`;
+          console.warn(`No name found for product, using fallback: ${name}`, product);
+        }
+        
+        // Ensure the image URL is properly handled
+        let image_url = product.image_url;
+        
+        // If we have an image URL but it needs processing
+        if (image_url && !image_url.startsWith('http') && !image_url.startsWith('data:')) {
+          if (image_url.startsWith('/')) {
+            image_url = `http://localhost:8001${image_url}`;
+          } else {
+            image_url = `http://localhost:8001/uploads/products/${image_url}`;
+          }
+        }
+        
+        return {
+          name: name,
+          totalSales: product.totalSales,
+          quantity: product.quantity,
+          orders: product.orders,
+          daysWithData: product.daysWithData || 1,
+          source: 'inventory',
+          image_url: image_url || this.determineProductImageUrl(null, name)
+        };
+      });
+      
+      // Sort by total sales (highest first)
+      formattedProducts.sort((a, b) => b.totalSales - a.totalSales);
+      
+      // Store in topProducts or merge with existing
+      if (!this.topProducts || this.topProducts.length === 0) {
+        this.topProducts = formattedProducts.slice(0, 10);
+      } else {
+        // Merge with existing top products, combining any with the same name
+        let mergedProducts = [...this.topProducts];
+        
+        // For each new product
+        formattedProducts.forEach(newProduct => {
+          // Normalize names for comparison (lowercase and trim)
+          const normalizedNewName = newProduct.name.toLowerCase().trim();
+          
+          // Check if this product already exists in our list
+          const existingProductIndex = mergedProducts.findIndex(p => 
+            p.name.toLowerCase().trim() === normalizedNewName
+          );
+          
+          if (existingProductIndex >= 0) {
+            // Product already exists, merge the data
+            const existingProduct = mergedProducts[existingProductIndex];
+            
+            // Combine the sales data
+            existingProduct.totalSales += newProduct.totalSales;
+            existingProduct.quantity += newProduct.quantity;
+            existingProduct.orders += newProduct.orders;
+            existingProduct.daysWithData = Math.max(existingProduct.daysWithData, newProduct.daysWithData || 0);
+            
+            // Mark as combined product
+            existingProduct.source = 'combined';
+            
+            // Update the product in the array
+            mergedProducts[existingProductIndex] = existingProduct;
+          } else {
+            // This is a new product, add it to the array
+            mergedProducts.push(newProduct);
+          }
+        });
+        
+        // Sort by total sales again
+        mergedProducts.sort((a, b) => b.totalSales - a.totalSales);
+        
+        // Keep only the top 5
+        this.topProducts = mergedProducts.slice(0, 5);
+      }
+      
+      // Store the data in localStorage
+      localStorage.setItem('topProductsData', JSON.stringify(this.topProducts));
+      localStorage.setItem('topProductsTimestamp', new Date().toISOString());
+      
+      // Log for debugging
+      console.log(`Top products after adding inventory products:`, this.topProducts);
+      
+      // Generate prediction data
+      this.generatePredictionData();
+    },
+    
+    // Process sales data from Inventory system into monthly format - for chart data only
+    processInventorySalesData(salesData) {
+      console.log("Processing Inventory system sales data for charts...");
+      
+      // Monthly totals and counts
+      const monthlyTotals = new Array(12).fill(0);
+      const daysWithData = new Array(12).fill(0);
+      const uniqueDays = new Array(12).fill().map(() => new Set());
+      
+      // Current month and year
+      const currentMonth = new Date().getMonth();
+      const currentYear = new Date().getFullYear();
+      
+      // Process each day's sales data
+      salesData.forEach(day => {
+        if (!day.date) return;
+        
+        // Parse the date
+        const saleDate = new Date(day.date);
+        if (isNaN(saleDate.getTime())) {
+          console.warn(`Invalid date in inventory sales: ${day.date}`);
+          return;
+        }
+        
+        const month = saleDate.getMonth();
+        const dayOfMonth = saleDate.getDate();
+        const year = saleDate.getFullYear();
+        
+        // Only process current year
+        if (year !== currentYear) {
+          return;
+        }
+        
+        // Add to unique days
+        uniqueDays[month].add(dayOfMonth);
+        
+        // Add sales to monthly total
+        const salesAmount = parseFloat(day.sales) || 0;
+        monthlyTotals[month] += salesAmount;
+      });
+      
+      // Count unique days with data
+      for (let i = 0; i < 12; i++) {
+        daysWithData[i] = uniqueDays[i].size;
+      }
+      
+      // Log monthly summaries
+      console.log("Inventory system monthly summaries:");
+      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      for (let i = 0; i < 12; i++) {
+        if (monthlyTotals[i] > 0) {
+          console.log(`${monthNames[i]}: ₱${monthlyTotals[i].toFixed(2)}, ${daysWithData[i]} days with data`);
+        }
+      }
+      
+      // Create or update monthly data
+      if (!this.monthlyData || this.monthlyData.length === 0) {
+        this.monthlyData = monthNames.map((month, index) => ({
+          month: month,
+          sales: monthlyTotals[index],
+          daysWithData: daysWithData[index],
+          orderCount: daysWithData[index] // Use days with data as proxy for order count
+        }));
+      } else {
+        // Add to existing data
+        for (let i = 0; i < 12; i++) {
+          this.monthlyData[i].sales += monthlyTotals[i];
+          this.monthlyData[i].daysWithData = Math.max(this.monthlyData[i].daysWithData, daysWithData[i]);
+          // We don't have actual order counts from inventory system, so we don't update orderCount
+        }
+      }
     },
     
     // Determine the image URL for a product
@@ -356,35 +657,11 @@ export default {
         return item.image;
       }
       
-      // Format the product name for URL use
+      // Get product name for the fallback image
       const productNameStr = productName || (item ? item.name : '') || '';
       
-      // Get initial letter for the SVG
-      const initial = productNameStr.charAt(0).toUpperCase();
-      
-      // Generate color based on product name for consistency
-      const colors = [
-        '#2c7be5', // Blue
-        '#00d97e', // Green
-        '#f6c343', // Yellow
-        '#e63757', // Red
-        '#6b5eae', // Purple
-        '#a85a32', // Brown
-        '#4a90e2', // Light blue
-        '#43a047'  // Matcha green
-      ];
-      
-      // Simple hash function for name
-      let hash = 0;
-      for (let i = 0; i < productNameStr.length; i++) {
-        hash = productNameStr.charCodeAt(i) + ((hash << 5) - hash);
-      }
-      
-      const bgColor = colors[Math.abs(hash) % colors.length];
-      
-      // Generate an SVG with the product's initial and consistent background color
-      // Using direct color values instead of encoding for better readability
-      return `data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64'%3E%3Crect fill='${bgColor}' width='64' height='64'/%3E%3Ctext fill='white' font-family='Arial,Sans-serif' font-size='28' font-weight='bold' text-anchor='middle' x='32' y='42'%3E${initial}%3C/text%3E%3C/svg%3E`;
+      // Return a fallback image using our helper
+      return this.createFallbackImage(productNameStr);
     },
     
     // Initialize with empty data for current year
@@ -466,17 +743,28 @@ export default {
     
     // Render the monthly sales chart
     renderMonthlySalesChart() {
+      try {
       const canvas = this.$refs.monthlySalesChart;
         if (!canvas) {
         console.warn('Monthly sales chart canvas not found');
           return;
         }
         
+        // Check if the canvas is in the DOM
+        if (!document.body.contains(canvas)) {
+          console.warn('Monthly sales chart canvas is not in the DOM');
+          return;
+        }
+        
       // Destroy existing chart if it exists
       if (this.monthlySalesChart) {
         this.monthlySalesChart.destroy();
+          this.monthlySalesChart = null;
       }
       
+        // Wait a bit to ensure DOM is ready
+        setTimeout(() => {
+          try {
       // Prepare data for the chart
       const months = this.monthlyData.map(item => item.month);
       const salesData = this.monthlyData.map(item => item.sales);
@@ -516,7 +804,9 @@ export default {
             maintainAspectRatio: false,
             scales: {
               y: {
+                    type: this.useLogScale ? 'logarithmic' : 'linear',
                 beginAtZero: true,
+                    min: this.useLogScale ? 1000 : 0, // Minimum value depends on scale type
                 ticks: {
                 callback: (value) => this.formatCurrency(value)
               }
@@ -552,6 +842,13 @@ export default {
             }
           }
         });
+          } catch (e) {
+            console.error('Error rendering monthly sales chart:', e);
+          }
+        }, 100);
+      } catch (e) {
+        console.error('Error in renderMonthlySalesChart:', e);
+      }
     },
     
     // Format currency for display
@@ -563,8 +860,10 @@ export default {
       }).format(value);
     },
     
-    // Process top products for a specific month
-    processTopProducts(productSales, month) {
+    // Process top products (modified to handle multiple sources)
+    processTopProducts(productSales, month, source = 'cafe') {
+      console.log(`Processing top products from ${source} for month ${month}`);
+      
       // Get month name for display
       const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
       this.currentMonthName = monthNames[month];
@@ -573,32 +872,125 @@ export default {
       const nextMonth = (month + 1) % 12;
       this.nextMonthName = monthNames[nextMonth];
       
-      // Convert product sales object to array
-      const productsArray = Object.values(productSales || {});
+      // Convert product sales object to array and validate names
+      let unnamedCount = 0;
+      const productsArray = Object.values(productSales || {}).map(product => {
+        // Add detailed logging for debugging
+        console.log(`Processing product: ${JSON.stringify(product)}`);
+        
+        // Try to find the product name from different possible fields
+        if (!product.name || product.name.trim() === '') {
+          // Check various common name fields
+          if (product.title && product.title.trim() !== '') {
+            product.name = product.title;
+          } else if (product.product_name && product.product_name.trim() !== '') {
+            product.name = product.product_name;
+          } else if (product.item_name && product.item_name.trim() !== '') {
+            product.name = product.item_name;
+          } else if (product.image_url) {
+            // Try to extract name from image URL
+            try {
+              // Extract filename from URL
+              const urlParts = product.image_url.split('/');
+              let fileName = urlParts[urlParts.length - 1];
+              
+              // Remove extension
+              fileName = fileName.split('.')[0];
+              
+              // Replace underscores and hyphens with spaces
+              fileName = fileName.replace(/[_-]/g, ' ');
+              
+              // Capitalize each word
+              fileName = fileName.split(' ').map(word => 
+                word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+              ).join(' ');
+              
+              if (fileName) {
+                product.name = fileName;
+                console.log(`Extracted name from image URL: ${product.name}`);
+              } else {
+                product.name = `Unnamed Product ${++unnamedCount}`;
+              }
+            } catch (e) {
+              console.error('Error extracting name from image URL:', e);
+              product.name = `Unnamed Product ${++unnamedCount}`;
+            }
+          } else {
+            product.name = `Unnamed Product ${++unnamedCount}`;
+          }
+          
+          console.log(`Using name: ${product.name} for product with missing name`);
+        }
+        return product;
+      });
       
+      // If this is the first source being processed, set topProducts directly
+      // Otherwise, merge with existing topProducts
+      if (!this.topProducts || this.topProducts.length === 0) {
       // Sort by total sales (highest first)
       productsArray.sort((a, b) => b.totalSales - a.totalSales);
       
-      // Take the top 5 products
-      this.topProducts = productsArray.slice(0, 5);
+        // Take the top products
+        this.topProducts = productsArray.slice(0, 10); // Get more than 5 to allow for merging
+      } else {
+        // Merge with existing top products, combining any with the same name
+        let mergedProducts = [...this.topProducts];
+        
+        // For each new product
+        productsArray.forEach(newProduct => {
+          // Normalize names for comparison (lowercase and trim)
+          const normalizedNewName = newProduct.name.toLowerCase().trim();
+          
+          // Check if this product already exists in our list
+          const existingProductIndex = mergedProducts.findIndex(p => 
+            p.name.toLowerCase().trim() === normalizedNewName
+          );
+          
+          if (existingProductIndex >= 0) {
+            // Product already exists, merge the data
+            const existingProduct = mergedProducts[existingProductIndex];
+            
+            // Combine the sales data
+            existingProduct.totalSales += newProduct.totalSales;
+            existingProduct.quantity += newProduct.quantity;
+            existingProduct.orders += newProduct.orders;
+            existingProduct.daysWithData = Math.max(existingProduct.daysWithData, newProduct.daysWithData || 0);
+            
+            // Mark as combined product
+            existingProduct.source = 'combined';
+            
+            // Update the product in the array
+            mergedProducts[existingProductIndex] = existingProduct;
+          } else {
+            // This is a new product, add it to the array
+            mergedProducts.push(newProduct);
+          }
+        });
+        
+        // Sort by total sales again
+        mergedProducts.sort((a, b) => b.totalSales - a.totalSales);
+        
+        // Keep only the top 5
+        this.topProducts = mergedProducts.slice(0, 5);
+      }
       
-      // Store the data in localStorage so Dashboard page can use it too
+      // Store the data in localStorage
       localStorage.setItem('topProductsData', JSON.stringify(this.topProducts));
       localStorage.setItem('topProductsTimestamp', new Date().toISOString());
       
       // Log for debugging
       if (this.topProducts.length > 0) {
-        console.log(`Top 5 Products for ${this.currentMonthName}:`, this.topProducts);
+        console.log(`Top products for ${this.currentMonthName} (after ${source} data):`, this.topProducts);
       } else {
         console.log(`No product data for ${this.currentMonthName}`);
       }
       
-      // Generate predictions for next month
-      this.generateProductPredictions();
+      // Generate prediction data
+      this.generatePredictionData();
     },
     
     // Generate predictions for top products in the next month
-    generateProductPredictions() {
+    generatePredictionData() {
       if (!this.topProducts || this.topProducts.length === 0) {
         this.predictedProducts = [];
         return;
@@ -660,12 +1052,8 @@ export default {
       // Sort by predicted sales (highest first)
       this.predictedProducts.sort((a, b) => b.predictedSales - a.predictedSales);
       
-      // Render the predictions chart in the next tick
-      this.$nextTick(() => {
-        setTimeout(() => {
-          this.renderPredictionsChart();
-        }, 500);
-      });
+      // Log that prediction data is ready
+      console.log('Prediction data generated successfully');
     },
     
     // Calculate growth factor based on product performance
@@ -756,26 +1144,38 @@ export default {
     
     // Render the predictions chart
     renderPredictionsChart() {
+      try {
       const canvas = this.$refs.predictionsChart;
       if (!canvas) {
         console.warn('Predictions chart canvas not found');
+        return;
+      }
+        
+        // Check if the canvas is in the DOM
+        if (!document.body.contains(canvas)) {
+          console.warn('Predictions chart canvas is not in the DOM');
         return;
       }
       
       // Destroy existing chart if it exists
       if (this.predictionsChart) {
         this.predictionsChart.destroy();
+          this.predictionsChart = null;
       }
       
       // Skip if no predictions
       if (!this.predictedProducts || this.predictedProducts.length === 0) {
+          console.warn('No prediction data available');
         return;
       }
       
+        // Wait a bit to ensure DOM is ready
+        setTimeout(() => {
+          try {
       // Prepare line chart datasets
       const datasets = this.predictedProducts.map((product, index) => {
         return {
-          label: product.name,
+                label: this.cleanProductName(product.name),
           data: product.dailyPredictions.map(day => ({ x: day.day, y: day.sales })),
           borderColor: this.getBarColor(index),
           backgroundColor: this.getBarColor(index) + '33', // Add transparency
@@ -832,7 +1232,7 @@ export default {
                   const sales = context.parsed.y;
                   
                   return [
-                    `${product.name}`,
+                          `${this.cleanProductName(product.name)}`,
                     `Day ${day}: ${this.formatCurrency(sales)}`
                   ];
                 }
@@ -848,16 +1248,96 @@ export default {
           }
         }
       });
+          } catch (e) {
+            console.error('Error rendering predictions chart:', e);
+          }
+        }, 100);
+      } catch (e) {
+        console.error('Error in renderPredictionsChart:', e);
+      }
     },
     
     // Method to handle image loading errors (as a backup)
     onImageError(event) {
+      // Log the error for debugging
+      console.error(`Image failed to load: ${event.target.src}`, event);
+      
       // Get the product name from the alt attribute
       const productName = event.target.alt || 'Product';
-      const initial = productName.charAt(0).toUpperCase();
       
-      // Use a simple generic SVG as fallback
-      event.target.src = `data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64'%3E%3Crect fill='%23cccccc' width='64' height='64'/%3E%3Ctext fill='white' font-family='Arial,Sans-serif' font-size='28' font-weight='bold' text-anchor='middle' x='32' y='42'%3E${initial}%3C/text%3E%3C/svg%3E`;
+      // Use our helper method to create a fallback image
+      event.target.src = this.createFallbackImage(productName);
+    },
+    
+    // Get fixed image URL for product
+    getFixedImageUrl(product) {
+      if (!product) return '';
+      
+      // For combined products, prefer the image from the inventory system if available
+      if (product.source === 'combined' && product.image_url) {
+        // If the URL doesn't start with http or data:, it might be a relative path
+        if (!product.image_url.startsWith('http') && !product.image_url.startsWith('data:')) {
+          if (product.image_url.startsWith('/')) {
+            return `http://localhost:8001${product.image_url}`;
+          } else {
+            return `http://localhost:8001/${product.image_url}`;
+          }
+        }
+        return product.image_url;
+      }
+      
+      // For inventory products, check if the URL is relative
+      if (product.source === 'inventory' && product.image_url) {
+        if (!product.image_url.startsWith('http') && !product.image_url.startsWith('data:')) {
+          // Special handling for inventory product images
+          if (product.image_url.startsWith('/uploads/')) {
+            return `http://localhost:8001${product.image_url}`;
+          } else if (product.image_url.startsWith('uploads/')) {
+            return `http://localhost:8001/${product.image_url}`;
+          } else if (product.image_url.startsWith('/')) {
+            return `http://localhost:8001${product.image_url}`;
+          } else {
+            return `http://localhost:8001/uploads/products/${product.image_url}`;
+          }
+        }
+        return product.image_url;
+      }
+      
+      // For cafe products or if no image is available
+      if (product.image_url) {
+        if (!product.image_url.startsWith('http') && !product.image_url.startsWith('data:')) {
+          if (product.image_url.startsWith('/')) {
+            return `http://localhost:8000${product.image_url}`;
+          } else {
+            return `http://localhost:8000/${product.image_url}`;
+          }
+        }
+        return product.image_url;
+      }
+      
+      // Create a fallback image using our helper
+      return this.createFallbackImage(product.name);
+    },
+    
+    // Get a consistent color based on a string
+    getHashColor(str) {
+      const colors = [
+        '#2c7be5', // Blue
+        '#00d97e', // Green
+        '#f6c343', // Yellow
+        '#e63757', // Red
+        '#6b5eae', // Purple
+        '#a85a32', // Brown
+        '#4a90e2', // Light blue
+        '#43a047'  // Matcha green
+      ];
+      
+      let hash = 0;
+      for (let i = 0; i < str.length; i++) {
+        hash = str.charCodeAt(i) + ((hash << 5) - hash);
+      }
+      
+      return colors[Math.abs(hash) % colors.length];
     },
     
     // Calculate bar width as percentage of max sales
@@ -900,6 +1380,13 @@ export default {
         { name: 'Ube Frappe', totalSales: 630.00, quantity: 7, orders: 7, daysWithData: 30 }
       ];
       
+      // Validate product data to ensure all have names
+      productData.forEach((product, index) => {
+        if (!product.name || product.name.trim() === '') {
+          product.name = `Demo Product ${index + 1}`;
+        }
+      });
+      
       // Convert to object structure for processTopProducts
       const demoProducts = {};
       productData.forEach(product => {
@@ -925,18 +1412,115 @@ export default {
       
       // Calculate statistics
       this.calculateStatistics();
+      this.preloadProductImages();
       
       // Set loading to false
       this.loading = false;
       
-      // Render the chart
-      this.$nextTick(() => {
-        setTimeout(() => {
-          this.renderMonthlySalesChart();
-        }, 300);
-      });
+      // Safely initialize charts after data is loaded
+      this.safeInitializeCharts();
       
       this.toast.success('Demo data loaded successfully');
+    },
+    
+    // Safely initialize charts with proper timing
+    safeInitializeCharts() {
+      console.log('Scheduling safe chart initialization...');
+      
+      // Use nextTick to ensure Vue has updated the DOM
+      nextTick(() => {
+        // Use a longer timeout to ensure DOM is fully rendered
+        setTimeout(() => {
+          console.log('Rendering monthly sales chart...');
+          this.renderMonthlySalesChart();
+          
+          // Render predictions chart after a short delay
+          setTimeout(() => {
+            console.log('Rendering predictions chart...');
+            this.renderPredictionsChart();
+          }, 500);
+        }, 800);
+      });
+    },
+    
+    // Preload product images to avoid loading issues
+    preloadProductImages() {
+      if (!this.topProducts || this.topProducts.length === 0) return;
+      
+      console.log('Preloading product images...');
+      
+      this.topProducts.forEach(product => {
+        if (product.image_url) {
+          const img = new Image();
+          img.onload = () => console.log(`Successfully preloaded image for ${product.name}`);
+          img.onerror = () => {
+            console.warn(`Failed to preload image for ${product.name}, generating fallback`);
+            // Generate a fallback image using our helper
+            product.fallback_image = this.createFallbackImage(product.name);
+          };
+          img.src = this.getFixedImageUrl(product);
+        }
+      });
+    },
+    
+    // Helper method to create a fallback image
+    createFallbackImage(productName) {
+      try {
+        const initial = (productName || '?').charAt(0).toUpperCase();
+        const color = this.getHashColor(productName || 'default');
+        
+        // Create canvas element
+        const canvas = document.createElement('canvas');
+        canvas.width = 64;
+        canvas.height = 64;
+        
+        // Get context - if this fails, return a default base64 image
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          console.warn('Failed to get canvas context');
+          return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMElEQVQ4jWNgGAXDAAxh8P//f1EM9/9UyZb//8hzAEwdTQ1AdjnlDsBnKM0CGQAAgaYemQNz0rAAAAAASUVORK5CYII=';
+        }
+        
+        // Draw colored background
+        ctx.fillStyle = color;
+        ctx.fillRect(0, 0, 64, 64);
+        
+        // Draw text
+        ctx.fillStyle = 'white';
+        ctx.font = 'bold 28px Arial, Sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(initial, 32, 32);
+        
+        // Return canvas data URL
+        return canvas.toDataURL('image/png');
+      } catch (e) {
+        console.error('Error creating canvas fallback:', e);
+        // Simple colored div as ultimate fallback
+        return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMElEQVQ4jWNgGAXDAAxh8P//f1EM9/9UyZb//8hzAEwdTQ1AdjnlDsBnKM0CGQAAgaYemQNz0rAAAAAASUVORK5CYII=';
+      }
+    },
+    
+    // Toggle between logarithmic and linear scale
+    toggleChartScale() {
+      this.useLogScale = !this.useLogScale;
+      this.renderMonthlySalesChart();
+    },
+    
+    // Clean product names for better display
+    cleanProductName(name) {
+      if (!name) return 'Product';
+      
+      // Remove numeric IDs from the beginning (like 5435345 Geeyt → Geeyt)
+      const nameWithoutId = name.replace(/^\d+\s+/, '');
+      
+      // If the name became empty after removing numbers, return the original
+      if (!nameWithoutId.trim()) return name;
+      
+      // Capitalize the first letter of each word
+      return nameWithoutId.split(' ').map(word => 
+        word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+      ).join(' ');
     },
   }
 };
@@ -1109,6 +1693,7 @@ export default {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  display: block;
 }
 
 .product-info {
@@ -1289,5 +1874,46 @@ export default {
 
 .refresh-button:hover {
   color: #2c7be5;
+}
+
+/* Combined badge style */
+.combined-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 500;
+  background-color: #6b5eae;
+  color: white;
+  padding: 2px 6px;
+  border-radius: 10px;
+  margin-left: 8px;
+  vertical-align: middle;
+  text-transform: uppercase;
+}
+
+.unnamed-note {
+  font-size: 11px;
+  color: #999;
+  font-style: italic;
+  margin-left: 5px;
+}
+
+/* Add this to the <style> section */
+.scale-toggle {
+  font-size: 12px;
+  font-weight: normal;
+  color: #2c7be5;
+  cursor: pointer;
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background-color: #f0f7ff;
+  transition: all 0.2s ease;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.scale-toggle:hover {
+  background-color: #e0efff;
+  color: #1a68d4;
 }
 </style> 
