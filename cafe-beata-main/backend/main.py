@@ -571,17 +571,21 @@ async def update_order_status(order_id: str, status_update: OrderStatusUpdate):
                                                 if inventory_response.status_code == 200:
                                                     print(f"Successfully updated inventory for item {item_result['external_id']}")
                                                     
-                                                    # Also send a webhook notification to trigger UI refresh
+                                                    # We don't need to send an additional webhook notification
+                                                    # The inventory system update already updates the quantity
+                                                    # Remove this part to avoid double deduction
+                                                    '''
                                                     try:
                                                         webhook_response = requests.post(
                                                             "http://127.0.0.1:8001/api/inventory-webhook/stock-update",
                                                             json={"product_id": item_result['external_id']},
                                                             headers={"Content-Type": "application/json"},
-                                                            timeout=2  # Reduced timeout from 5 to 2 seconds
+                                                            timeout=2
                                                         )
                                                         print(f"Webhook notification response: {webhook_response.status_code} - {webhook_response.text}")
                                                     except Exception as webhook_error:
                                                         print(f"Error sending webhook notification: {str(webhook_error)}")
+                                                    '''
                                                 else:
                                                     print(f"Failed to update inventory system: {inventory_response.text}")
                                                     # Log the error but don't fail the order
@@ -679,6 +683,9 @@ async def update_order_status(order_id: str, status_update: OrderStatusUpdate):
                                     except Exception as sales_db_error:
                                         print(f"Error directly updating sales table: {str(sales_db_error)}")
                                     
+                                    # We don't need to call the API since we're already updating the database directly
+                                    # This API call is redundant and causes duplicate sales entries
+                                    '''
                                     # Option 2: API call to inventory system (as fallback)
                                     try:
                                         # Call the inventory API to update sales
@@ -702,6 +709,7 @@ async def update_order_status(order_id: str, status_update: OrderStatusUpdate):
                                             print(f"Failed to update sales via API: {sales_response.text}")
                                     except Exception as sales_api_error:
                                         print(f"Error updating sales via API: {str(sales_api_error)}")
+                                    '''
                                 
                                 cursor.close()
                                 connection.close()
@@ -2039,50 +2047,60 @@ async def inventory_webhook_stock_update(request: Request, background_tasks: Bac
                     local_item_id = item_result["id"]
                     print(f"Found local item ID {local_item_id} for inventory product {product_id}")
                     
-                    # Get minimum stock level if it exists
-                    cursor.execute("SELECT min_stock_level FROM item_stocks WHERE item_id = %s", (local_item_id,))
+                    # Get minimum stock level and current quantity if it exists
+                    cursor.execute("SELECT quantity, min_stock_level FROM item_stocks WHERE item_id = %s", (local_item_id,))
                     stock_level_result = cursor.fetchone()
-                    min_stock_level = 5  # Default
+                    
+                    # Default values
+                    min_stock_level = 5
+                    current_quantity = None
+                    
                     if stock_level_result:
                         min_stock_level = stock_level_result.get('min_stock_level', 5)
+                        current_quantity = stock_level_result.get('quantity')
                     
-                    # Update the stock quantity
-                    cursor.execute(
-                        "UPDATE item_stocks SET quantity = %s WHERE item_id = %s",
-                        (quantity, local_item_id)
-                    )
-                    
-                    rows_affected = cursor.rowcount
-                    if rows_affected > 0:
-                        print(f"Updated {rows_affected} rows for item {local_item_id}")
+                    # Only update if quantity has actually changed
+                    if current_quantity is None or current_quantity != quantity:
+                        print(f"Updating stock from {current_quantity} to {quantity} for item {local_item_id}")
                         
-                        # Immediate broadcast to all connected clients for fast UI refresh
-                        asyncio.create_task(manager.broadcast({
-                            "type": "stock_update",
-                            "item_id": local_item_id,
-                            "new_quantity": quantity,
-                            "min_stock_level": min_stock_level,
-                            "timestamp": datetime.now().isoformat()
-                        }))
-                    else:
-                        print(f"No stock record existed for item {local_item_id}, creating one")
-                        # If no stock record exists, create one
+                        # Update the stock quantity
                         cursor.execute(
-                            "INSERT INTO item_stocks (item_id, quantity, min_stock_level) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE quantity = VALUES(quantity)",
-                            (local_item_id, quantity, min_stock_level)
+                            "UPDATE item_stocks SET quantity = %s WHERE item_id = %s",
+                            (quantity, local_item_id)
                         )
                         
-                        # Broadcast this new stock record too
-                        asyncio.create_task(manager.broadcast({
-                            "type": "stock_update",
-                            "item_id": local_item_id,
-                            "new_quantity": quantity,
-                            "min_stock_level": min_stock_level,
-                            "timestamp": datetime.now().isoformat()
-                        }))
+                        rows_affected = cursor.rowcount
+                        if rows_affected > 0:
+                            print(f"Updated {rows_affected} rows for item {local_item_id}")
+                            
+                            # Immediate broadcast to all connected clients for fast UI refresh
+                            asyncio.create_task(manager.broadcast({
+                                "type": "stock_update",
+                                "item_id": local_item_id,
+                                "new_quantity": quantity,
+                                "min_stock_level": min_stock_level,
+                                "timestamp": datetime.now().isoformat()
+                            }))
+                        else:
+                            print(f"No stock record existed for item {local_item_id}, creating one")
+                            # If no stock record exists, create one
+                            cursor.execute(
+                                "INSERT INTO item_stocks (item_id, quantity, min_stock_level) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE quantity = VALUES(quantity)",
+                                (local_item_id, quantity, min_stock_level)
+                            )
+                            
+                            # Broadcast this new stock record too
+                            asyncio.create_task(manager.broadcast({
+                                "type": "stock_update",
+                                "item_id": local_item_id,
+                                "new_quantity": quantity,
+                                "min_stock_level": min_stock_level,
+                                "timestamp": datetime.now().isoformat()
+                            }))
+                    else:
+                        print(f"No update needed for item {local_item_id}: current quantity already at {quantity}")
                     
                     connection.commit()
-                    print(f"Successfully updated stock for item {local_item_id} to {quantity}")
                 else:
                     print(f"External product {product_id} not found in local system")
             except Exception as e:
@@ -2092,8 +2110,8 @@ async def inventory_webhook_stock_update(request: Request, background_tasks: Bac
                 cursor.close()
                 connection.close()
         
-        # Schedule a full stock sync in the background for consistency
-        asyncio.create_task(sync_inventory_stocks())
+        # Don't trigger a full sync every time - this was causing duplicate updates
+        # asyncio.create_task(sync_inventory_stocks())
         
         return {"success": True, "message": "Stock update processed"}
     except Exception as e:
@@ -2200,39 +2218,43 @@ async def sync_specific_inventory_product(product_id: int):
             quantity = product.get("Quantity", 0)
             threshold = product.get("Threshold", 5)
             
-            # Update the stock in our database
-            cursor.execute("SELECT quantity FROM item_stocks WHERE item_id = %s", (local_item_id,))
+            # Get current stock level in our system
+            cursor.execute("SELECT quantity, min_stock_level FROM item_stocks WHERE item_id = %s", (local_item_id,))
             stock_result = cursor.fetchone()
             
-            if stock_result:
-                # Update existing stock
-                cursor.execute(
-                    "UPDATE item_stocks SET quantity = %s, min_stock_level = %s WHERE item_id = %s",
-                    (quantity, threshold, local_item_id)
-                )
-                logger.info(f"Updated stock for {item_result['name']} (ID: {local_item_id}) to {quantity}")
+            # Only update if the stock levels differ to avoid redundant updates
+            if not stock_result or stock_result['quantity'] != quantity or stock_result.get('min_stock_level', 0) != threshold:
+                if stock_result:
+                    # Update existing stock
+                    cursor.execute(
+                        "UPDATE item_stocks SET quantity = %s, min_stock_level = %s WHERE item_id = %s",
+                        (quantity, threshold, local_item_id)
+                    )
+                    logger.info(f"Updated stock for {item_result['name']} (ID: {local_item_id}) from {stock_result['quantity']} to {quantity}")
+                else:
+                    # Create new stock record
+                    cursor.execute(
+                        "INSERT INTO item_stocks (item_id, quantity, min_stock_level) VALUES (%s, %s, %s)",
+                        (local_item_id, quantity, threshold)
+                    )
+                    logger.info(f"Created new stock record for {item_result['name']} (ID: {local_item_id}) with quantity {quantity}")
+                
+                connection.commit()
+                
+                # Broadcast the stock update to all connected clients
+                try:
+                    await manager.broadcast({
+                        "type": "stock_update",
+                        "item_id": local_item_id,
+                        "new_quantity": quantity,
+                        "min_stock_level": threshold,
+                        "timestamp": datetime.now().isoformat()
+                    })
+                except Exception as broadcast_error:
+                    # Log the error but continue, this shouldn't prevent the function from completing
+                    logger.error(f"Error broadcasting stock update: {broadcast_error}")
             else:
-                # Create new stock record
-                cursor.execute(
-                    "INSERT INTO item_stocks (item_id, quantity, min_stock_level) VALUES (%s, %s, %s)",
-                    (local_item_id, quantity, threshold)
-                )
-                logger.info(f"Created new stock record for {item_result['name']} (ID: {local_item_id}) with quantity {quantity}")
-            
-            connection.commit()
-            
-            # Broadcast the stock update to all connected clients
-            try:
-                await manager.broadcast({
-                    "type": "stock_update",
-                    "item_id": local_item_id,
-                    "new_quantity": quantity,
-                    "min_stock_level": threshold,
-                    "timestamp": datetime.now().isoformat()
-                })
-            except Exception as broadcast_error:
-                # Log the error but continue, this shouldn't prevent the function from completing
-                logger.error(f"Error broadcasting stock update: {broadcast_error}")
+                logger.info(f"Stock for {item_result['name']} (ID: {local_item_id}) already at correct level {quantity}, no update needed")
             
             cursor.close()
             connection.close()
