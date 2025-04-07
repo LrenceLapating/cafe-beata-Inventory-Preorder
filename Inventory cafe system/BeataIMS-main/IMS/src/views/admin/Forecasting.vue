@@ -1530,7 +1530,11 @@ export default {
 .app-container {
   padding: 20px;
   margin-left: 260px;
+  margin-top: 80px; /* Add top margin to account for fixed header */
   transition: margin-left 0.3s;
+  overflow-y: auto; /* Enable scrolling for the container */
+  position: relative; /* Add relative positioning */
+  height: calc(100vh - 80px); /* Set height to account for header */
 }
 
 .sales-container {
@@ -1616,6 +1620,8 @@ export default {
   .app-container {
     margin-left: 0;
     padding: 15px;
+    margin-top: 80px; /* Keep the top margin for header */
+    height: calc(100vh - 80px); /* Maintain height for smaller screens */
   }
   
   .dashboard-row {
@@ -1630,6 +1636,8 @@ export default {
 /* Add this new CSS for the top products table */
 .top-products-section {
   margin-bottom: 30px;
+  width: 100%;
+  overflow: visible;
 }
 
 .top-products-card {
@@ -1638,6 +1646,7 @@ export default {
   background: white;
   border-radius: 10px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+  overflow: hidden; /* Prevent content overflow */
 }
 
 .top-products-card h3 {

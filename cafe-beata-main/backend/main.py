@@ -54,6 +54,11 @@ UPLOAD_DIR = "uploads"
 AVATARS_DIR = os.path.join(UPLOAD_DIR, "avatars")
 os.makedirs(AVATARS_DIR, exist_ok=True)
 
+# Create backend uploads directory too
+BACKEND_UPLOAD_DIR = "backend/uploads" 
+BACKEND_AVATARS_DIR = os.path.join(BACKEND_UPLOAD_DIR, "avatars")
+os.makedirs(BACKEND_AVATARS_DIR, exist_ok=True)
+
 # Mount the uploads directory for static file serving
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
@@ -503,6 +508,9 @@ async def update_order_status(order_id: str, status_update: OrderStatusUpdate):
                 items = json.loads(order["items"]) if isinstance(order["items"], str) else order["items"]
                 print(f"Processing items for stock update: {items}")
                 
+                # Create a list to track background tasks
+                background_tasks = []
+                
                 for item in items:
                     try:
                         print(f"Processing item: {item}")
@@ -537,7 +545,7 @@ async def update_order_status(order_id: str, status_update: OrderStatusUpdate):
                                             "timestamp": datetime.now().isoformat()
                                         })
                                         
-                                        # Make request to inventory system using JSON data with proper error handling
+                                        # Create data for inventory system update
                                         inventory_url = f"http://127.0.0.1:8001/api/stock/adjust/{item_result['external_id']}"
                                         inventory_data = {
                                             "action": "subtract",
@@ -547,44 +555,53 @@ async def update_order_status(order_id: str, status_update: OrderStatusUpdate):
                                         print(f"Sending inventory update to: {inventory_url}")
                                         print(f"Inventory update data: {inventory_data}")
                                         
-                                        # Set a timeout to avoid hanging if the inventory system is down
-                                        inventory_response = requests.post(
-                                            inventory_url,
-                                            json=inventory_data,
-                                            headers={"Content-Type": "application/json"},
-                                            timeout=5  # 5 second timeout
-                                        )
-                                        
-                                        print(f"Inventory system response: {inventory_response.status_code} - {inventory_response.text}")
-                                        
-                                        if inventory_response.status_code == 200:
-                                            print(f"Successfully updated inventory for item {item_result['external_id']}")
-                                            
-                                            # Also send a webhook notification to trigger UI refresh
+                                        # Create async task for inventory update instead of waiting
+                                        async def update_inventory():
                                             try:
-                                                webhook_response = requests.post(
-                                                    "http://127.0.0.1:8001/api/inventory-webhook/stock-update",
-                                                    json={"product_id": item_result['external_id']},
+                                                # Set a shorter timeout to avoid hanging if the inventory system is down
+                                                inventory_response = requests.post(
+                                                    inventory_url,
+                                                    json=inventory_data,
                                                     headers={"Content-Type": "application/json"},
-                                                    timeout=5
+                                                    timeout=2  # Reduced timeout from 5 to 2 seconds
                                                 )
-                                                print(f"Webhook notification response: {webhook_response.status_code} - {webhook_response.text}")
-                                            except Exception as webhook_error:
-                                                print(f"Error sending webhook notification: {str(webhook_error)}")
-                                        else:
-                                            print(f"Failed to update inventory system: {inventory_response.text}")
-                                            # Log the error but don't fail the order
-                                            logger.error(f"Failed to update inventory system for order {order_id}: {inventory_response.text}")
-                                    except requests.exceptions.Timeout:
-                                        print(f"Timeout connecting to inventory system")
-                                        logger.error(f"Timeout connecting to inventory system for order {order_id}")
-                                    except requests.exceptions.ConnectionError:
-                                        print(f"Connection error to inventory system")
-                                        logger.error(f"Connection error to inventory system for order {order_id}")
-                                    except Exception as inv_error:
-                                        print(f"Error updating inventory system: {str(inv_error)}")
-                                        # Log the error but don't fail the order
-                                        logger.error(f"Error updating inventory system for order {order_id}: {str(inv_error)}")
+                                                
+                                                print(f"Inventory system response: {inventory_response.status_code} - {inventory_response.text}")
+                                                
+                                                if inventory_response.status_code == 200:
+                                                    print(f"Successfully updated inventory for item {item_result['external_id']}")
+                                                    
+                                                    # Also send a webhook notification to trigger UI refresh
+                                                    try:
+                                                        webhook_response = requests.post(
+                                                            "http://127.0.0.1:8001/api/inventory-webhook/stock-update",
+                                                            json={"product_id": item_result['external_id']},
+                                                            headers={"Content-Type": "application/json"},
+                                                            timeout=2  # Reduced timeout from 5 to 2 seconds
+                                                        )
+                                                        print(f"Webhook notification response: {webhook_response.status_code} - {webhook_response.text}")
+                                                    except Exception as webhook_error:
+                                                        print(f"Error sending webhook notification: {str(webhook_error)}")
+                                                else:
+                                                    print(f"Failed to update inventory system: {inventory_response.text}")
+                                                    # Log the error but don't fail the order
+                                                    logger.error(f"Failed to update inventory system for order {order_id}: {inventory_response.text}")
+                                            except requests.exceptions.Timeout:
+                                                print(f"Timeout connecting to inventory system")
+                                                logger.error(f"Timeout connecting to inventory system for order {order_id}")
+                                            except requests.exceptions.ConnectionError:
+                                                print(f"Connection error to inventory system")
+                                                logger.error(f"Connection error to inventory system for order {order_id}")
+                                            except Exception as inv_error:
+                                                print(f"Error updating inventory system: {str(inv_error)}")
+                                                # Log the error but don't fail the order
+                                                logger.error(f"Error updating inventory system for order {order_id}: {str(inv_error)}")
+                                                
+                                        # Add the task to our background tasks without awaiting it
+                                        task = asyncio.create_task(update_inventory())
+                                        background_tasks.append(task)
+                                    except Exception as e:
+                                        print(f"Error creating inventory update task: {str(e)}")
                             else:
                                 # Item exists but no stock record found - create one with 0 quantity
                                 print(f"No stock record found for item {item_id}, creating with 0 quantity")
@@ -598,93 +615,106 @@ async def update_order_status(order_id: str, status_update: OrderStatusUpdate):
                         print(f"Error processing item {item.get('name', 'unknown')}: {str(item_error)}")
                         # Continue processing other items
                 
-                # ADDED: Update the sales table for each item in the order
-                try:
-                    print("Updating sales records in inventory system...")
-                    for item in items:
-                        try:
-                            # Get item information
-                            cursor.execute("SELECT id, external_source, external_id, name FROM itemso WHERE name = %s", (item["name"],))
-                            item_result = cursor.fetchone()
-                            
-                            if item_result and item_result["external_source"] == "inventory" and item_result["external_id"]:
-                                # Calculate remitted amount (price * quantity)
-                                quantity_sold = item["quantity"]
-                                unit_price = item.get("price", 0)
-                                remitted = quantity_sold * unit_price
-                                product_id = item_result["external_id"]
+                # ADDED: Update the sales table for each item in the order, also in background
+                async def update_sales_records():
+                    try:
+                        print("Updating sales records in inventory system...")
+                        for item in items:
+                            try:
+                                # Get item information
+                                connection = get_db_connection()
+                                cursor = connection.cursor(dictionary=True)
                                 
-                                print(f"Adding sales record for product ID {product_id}: {quantity_sold} units at {unit_price} each")
+                                cursor.execute("SELECT id, external_source, external_id, name FROM itemso WHERE name = %s", (item["name"],))
+                                item_result = cursor.fetchone()
                                 
-                                # Option 1: Direct database update (since both systems share the same database)
-                                try:
-                                    # Get product details from inventory system
-                                    cursor.execute("""
-                                        SELECT ProductName, Image, UnitPrice FROM inventoryproduct 
-                                        WHERE id = %s
-                                    """, (product_id,))
-                                    product_data = cursor.fetchone()
+                                if item_result and item_result["external_source"] == "inventory" and item_result["external_id"]:
+                                    # Calculate remitted amount (price * quantity)
+                                    quantity_sold = item["quantity"]
+                                    unit_price = item.get("price", 0)
+                                    remitted = quantity_sold * unit_price
+                                    product_id = item_result["external_id"]
                                     
-                                    if product_data:
-                                        product_name = product_data.get("ProductName", item_result["name"])
-                                        image = product_data.get("Image", None)
-                                        db_unit_price = product_data.get("UnitPrice", unit_price)
-                                        
-                                        # Insert or update sales record
+                                    print(f"Adding sales record for product ID {product_id}: {quantity_sold} units at {unit_price} each")
+                                    
+                                    # Option 1: Direct database update (since both systems share the same database)
+                                    try:
+                                        # Get product details from inventory system
                                         cursor.execute("""
-                                            INSERT INTO sales (
+                                            SELECT ProductName, Image, UnitPrice FROM inventoryproduct 
+                                            WHERE id = %s
+                                        """, (product_id,))
+                                        product_data = cursor.fetchone()
+                                        
+                                        if product_data:
+                                            product_name = product_data.get("ProductName", item_result["name"])
+                                            image = product_data.get("Image", None)
+                                            db_unit_price = product_data.get("UnitPrice", unit_price)
+                                            
+                                            # Insert or update sales record
+                                            cursor.execute("""
+                                                INSERT INTO sales (
+                                                    product_id, 
+                                                    product_name, 
+                                                    Image, 
+                                                    quantity_sold, 
+                                                    unit_price,
+                                                    remitted, 
+                                                    created_at
+                                                )
+                                                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                                                ON DUPLICATE KEY UPDATE 
+                                                    quantity_sold = quantity_sold + VALUES(quantity_sold), 
+                                                    remitted = remitted + VALUES(remitted)
+                                            """, (
                                                 product_id, 
                                                 product_name, 
-                                                Image, 
+                                                image, 
                                                 quantity_sold, 
-                                                unit_price,
-                                                remitted, 
-                                                created_at
-                                            )
-                                            VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                                            ON DUPLICATE KEY UPDATE 
-                                                quantity_sold = quantity_sold + VALUES(quantity_sold), 
-                                                remitted = remitted + VALUES(remitted)
-                                        """, (
-                                            product_id, 
-                                            product_name, 
-                                            image, 
-                                            quantity_sold, 
-                                            db_unit_price,
-                                            remitted
-                                        ))
-                                        print(f"Sales record updated for {product_name} (ID: {product_id})")
-                                except Exception as sales_db_error:
-                                    print(f"Error directly updating sales table: {str(sales_db_error)}")
+                                                db_unit_price,
+                                                remitted
+                                            ))
+                                            connection.commit()
+                                            print(f"Sales record updated for {product_name} (ID: {product_id})")
+                                    except Exception as sales_db_error:
+                                        print(f"Error directly updating sales table: {str(sales_db_error)}")
+                                    
+                                    # Option 2: API call to inventory system (as fallback)
+                                    try:
+                                        # Call the inventory API to update sales
+                                        sales_url = "http://127.0.0.1:8001/api/sales/update"
+                                        sales_data = {
+                                            "product_id": int(product_id),
+                                            "quantity_sold": quantity_sold,
+                                            "remitted": remitted
+                                        }
+                                        
+                                        sales_response = requests.post(
+                                            sales_url,
+                                            json=sales_data,
+                                            headers={"Content-Type": "application/json"},
+                                            timeout=2  # Reduced timeout from 5 to 2 seconds
+                                        )
+                                        
+                                        if sales_response.status_code == 200:
+                                            print(f"Successfully updated sales via API for item {product_id}")
+                                        else:
+                                            print(f"Failed to update sales via API: {sales_response.text}")
+                                    except Exception as sales_api_error:
+                                        print(f"Error updating sales via API: {str(sales_api_error)}")
                                 
-                                # Option 2: API call to inventory system (as fallback)
-                                try:
-                                    # Call the inventory API to update sales
-                                    sales_url = "http://127.0.0.1:8001/api/sales/update"
-                                    sales_data = {
-                                        "product_id": int(product_id),
-                                        "quantity_sold": quantity_sold,
-                                        "remitted": remitted
-                                    }
-                                    
-                                    sales_response = requests.post(
-                                        sales_url,
-                                        json=sales_data,
-                                        headers={"Content-Type": "application/json"},
-                                        timeout=5
-                                    )
-                                    
-                                    if sales_response.status_code == 200:
-                                        print(f"Successfully updated sales via API for item {product_id}")
-                                    else:
-                                        print(f"Failed to update sales via API: {sales_response.text}")
-                                except Exception as sales_api_error:
-                                    print(f"Error updating sales via API: {str(sales_api_error)}")
-                        except Exception as item_sales_error:
-                            print(f"Error processing sales for item {item.get('name', 'unknown')}: {str(item_sales_error)}")
-                except Exception as sales_error:
-                    print(f"Error updating sales records: {str(sales_error)}")
-                    # Don't fail the order status update if sales update fails
+                                cursor.close()
+                                connection.close()
+                            except Exception as item_sales_error:
+                                print(f"Error processing sales for item {item.get('name', 'unknown')}: {str(item_sales_error)}")
+                    except Exception as sales_error:
+                        print(f"Error updating sales records: {str(sales_error)}")
+                        # Don't fail the order status update if sales update fails
+                
+                # Create and add the sales update task to our background tasks
+                sales_task = asyncio.create_task(update_sales_records())
+                background_tasks.append(sales_task)
+                
             except Exception as items_error:
                 print(f"Error processing order items: {str(items_error)}")
                 # Don't fail the order status update if stock update fails
@@ -897,12 +927,20 @@ async def add_item(name: str = Form(...), price: float = Form(...), category: st
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f"{timestamp}_{filename}"
         
-        # Ensure upload directory exists
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        # Ensure upload directories exist
+        os.makedirs(AVATARS_DIR, exist_ok=True)
+        os.makedirs(BACKEND_AVATARS_DIR, exist_ok=True)
         
-        file_path = os.path.join(UPLOAD_DIR, filename)
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(image.file, buffer)
+        # Save to both locations to ensure access
+        frontend_file_path = os.path.join(AVATARS_DIR, filename)
+        with open(frontend_file_path, "wb") as buffer:
+            contents = image.file.read()
+            buffer.write(contents)
+            image.file.seek(0)  # Reset file pointer
+            
+        backend_file_path = os.path.join(BACKEND_AVATARS_DIR, filename)
+        with open(backend_file_path, "wb") as buffer:
+            buffer.write(image.file.read())
         
         image_path = f"/uploads/avatars/{filename}"
         
@@ -955,15 +993,27 @@ async def update_item(
         connection = get_db_connection()
         cursor = connection.cursor()
         
+        image_path = None
         if image:
             # Save new image
             filename = secure_filename(image.filename)
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f"{timestamp}_{filename}"
             
-            file_path = os.path.join(UPLOAD_DIR, filename)
-            with open(file_path, "wb") as buffer:
-                shutil.copyfileobj(image.file, buffer)
+            # Ensure upload directories exist
+            os.makedirs(AVATARS_DIR, exist_ok=True)
+            os.makedirs(BACKEND_AVATARS_DIR, exist_ok=True)
+            
+            # Save to both locations to ensure access
+            frontend_file_path = os.path.join(AVATARS_DIR, filename)
+            with open(frontend_file_path, "wb") as buffer:
+                contents = image.file.read()
+                buffer.write(contents)
+                image.file.seek(0)  # Reset file pointer
+                
+            backend_file_path = os.path.join(BACKEND_AVATARS_DIR, filename)
+            with open(backend_file_path, "wb") as buffer:
+                buffer.write(image.file.read())
             
             image_path = f"/uploads/avatars/{filename}"
             
@@ -971,9 +1021,22 @@ async def update_item(
             cursor.execute("SELECT image FROM itemso WHERE id = %s", (item_id,))
             old_image = cursor.fetchone()
             if old_image and old_image[0]:
-                old_path = os.path.join(UPLOAD_DIR, os.path.basename(old_image[0]))
-                if os.path.exists(old_path):
-                    os.remove(old_path)
+                old_basename = os.path.basename(old_image[0])
+                old_frontend_path = os.path.join(AVATARS_DIR, old_basename)
+                old_backend_path = os.path.join(BACKEND_AVATARS_DIR, old_basename)
+                
+                # Try to remove both old images
+                if os.path.exists(old_frontend_path):
+                    try:
+                        os.remove(old_frontend_path)
+                    except Exception as e:
+                        print(f"Error removing old frontend image: {str(e)}")
+                        
+                if os.path.exists(old_backend_path):
+                    try:
+                        os.remove(old_backend_path)
+                    except Exception as e:
+                        print(f"Error removing old backend image: {str(e)}")
             
             cursor.execute(
                 "UPDATE itemso SET name = %s, price = %s, category = %s, image = %s WHERE id = %s",
@@ -1017,10 +1080,23 @@ async def delete_item(item_id: int):
         item = cursor.fetchone()
         
         if item and item[0]:
-            # Remove the image file
-            image_path = os.path.join(UPLOAD_DIR, os.path.basename(item[0]))
-            if os.path.exists(image_path):
-                os.remove(image_path)
+            # Remove the image file from both locations
+            old_basename = os.path.basename(item[0])
+            old_frontend_path = os.path.join(AVATARS_DIR, old_basename)
+            old_backend_path = os.path.join(BACKEND_AVATARS_DIR, old_basename)
+            
+            # Try to remove both images
+            if os.path.exists(old_frontend_path):
+                try:
+                    os.remove(old_frontend_path)
+                except Exception as e:
+                    print(f"Error removing old frontend image: {str(e)}")
+                    
+            if os.path.exists(old_backend_path):
+                try:
+                    os.remove(old_backend_path)
+                except Exception as e:
+                    print(f"Error removing old backend image: {str(e)}")
         
         # Delete the item's stock record first
         cursor.execute("DELETE FROM item_stocks WHERE item_id = %s", (item_id,))
@@ -2070,28 +2146,34 @@ async def sync_specific_inventory_product(product_id: int):
             # This product isn't in our system yet, we need to fetch it and create it
             from utils.inventory_client import get_inventory_product
             
-            # Fetch the product details from inventory
-            inventory_product = await get_inventory_product(product_id)
-            
-            if not inventory_product or not inventory_product.get("success"):
-                logger.error(f"Failed to fetch product {product_id} from inventory")
-                cursor.close()
-                connection.close()
-                return False
+            # Fetch the product details from inventory with a timeout
+            try:
+                inventory_product = await get_inventory_product(product_id)
                 
-            # Create the product in our system
-            await sync_inventory_products()  # This will create the product if it doesn't exist
-            
-            # Check again if the product exists now
-            cursor.execute(
-                "SELECT id, name FROM itemso WHERE external_id = %s AND external_source = 'inventory'", 
-                (product_id,)
-            )
-            
-            item_result = cursor.fetchone()
-            
-            if not item_result:
-                logger.error(f"Product {product_id} still not found after sync attempt")
+                if not inventory_product or not inventory_product.get("success"):
+                    logger.error(f"Failed to fetch product {product_id} from inventory")
+                    cursor.close()
+                    connection.close()
+                    return False
+                    
+                # Create the product in our system
+                await sync_inventory_products()  # This will create the product if it doesn't exist
+                
+                # Check again if the product exists now
+                cursor.execute(
+                    "SELECT id, name FROM itemso WHERE external_id = %s AND external_source = 'inventory'", 
+                    (product_id,)
+                )
+                
+                item_result = cursor.fetchone()
+                
+                if not item_result:
+                    logger.error(f"Product {product_id} still not found after sync attempt")
+                    cursor.close()
+                    connection.close()
+                    return False
+            except Exception as fetch_error:
+                logger.error(f"Error fetching product {product_id}: {fetch_error}")
                 cursor.close()
                 connection.close()
                 return False
@@ -2102,53 +2184,64 @@ async def sync_specific_inventory_product(product_id: int):
         
         # Fetch the latest stock information from inventory
         from utils.inventory_client import get_inventory_product
-        product_data = await get_inventory_product(product_id)
         
-        if not product_data or not product_data.get("success"):
-            logger.error(f"Failed to fetch updated product data for {product_id}")
+        try:
+            # Set a timeout to prevent long blocking
+            product_data = await get_inventory_product(product_id)
+            
+            if not product_data or not product_data.get("success"):
+                logger.error(f"Failed to fetch updated product data for {product_id}")
+                cursor.close()
+                connection.close()
+                return False
+                
+            # Extract product details
+            product = product_data.get("product", {})
+            quantity = product.get("Quantity", 0)
+            threshold = product.get("Threshold", 5)
+            
+            # Update the stock in our database
+            cursor.execute("SELECT quantity FROM item_stocks WHERE item_id = %s", (local_item_id,))
+            stock_result = cursor.fetchone()
+            
+            if stock_result:
+                # Update existing stock
+                cursor.execute(
+                    "UPDATE item_stocks SET quantity = %s, min_stock_level = %s WHERE item_id = %s",
+                    (quantity, threshold, local_item_id)
+                )
+                logger.info(f"Updated stock for {item_result['name']} (ID: {local_item_id}) to {quantity}")
+            else:
+                # Create new stock record
+                cursor.execute(
+                    "INSERT INTO item_stocks (item_id, quantity, min_stock_level) VALUES (%s, %s, %s)",
+                    (local_item_id, quantity, threshold)
+                )
+                logger.info(f"Created new stock record for {item_result['name']} (ID: {local_item_id}) with quantity {quantity}")
+            
+            connection.commit()
+            
+            # Broadcast the stock update to all connected clients
+            try:
+                await manager.broadcast({
+                    "type": "stock_update",
+                    "item_id": local_item_id,
+                    "new_quantity": quantity,
+                    "min_stock_level": threshold,
+                    "timestamp": datetime.now().isoformat()
+                })
+            except Exception as broadcast_error:
+                # Log the error but continue, this shouldn't prevent the function from completing
+                logger.error(f"Error broadcasting stock update: {broadcast_error}")
+            
+            cursor.close()
+            connection.close()
+            return True
+        except Exception as product_fetch_error:
+            logger.error(f"Error fetching product data for {product_id}: {product_fetch_error}")
             cursor.close()
             connection.close()
             return False
-            
-        # Extract product details
-        product = product_data.get("product", {})
-        quantity = product.get("Quantity", 0)
-        threshold = product.get("Threshold", 5)
-        
-        # Update the stock in our database
-        cursor.execute("SELECT quantity FROM item_stocks WHERE item_id = %s", (local_item_id,))
-        stock_result = cursor.fetchone()
-        
-        if stock_result:
-            # Update existing stock
-            cursor.execute(
-                "UPDATE item_stocks SET quantity = %s, min_stock_level = %s WHERE item_id = %s",
-                (quantity, threshold, local_item_id)
-            )
-            logger.info(f"Updated stock for {item_result['name']} (ID: {local_item_id}) to {quantity}")
-        else:
-            # Create new stock record
-            cursor.execute(
-                "INSERT INTO item_stocks (item_id, quantity, min_stock_level) VALUES (%s, %s, %s)",
-                (local_item_id, quantity, threshold)
-            )
-            logger.info(f"Created new stock record for {item_result['name']} (ID: {local_item_id}) with quantity {quantity}")
-        
-        connection.commit()
-        
-        # Broadcast the stock update to all connected clients
-        await manager.broadcast({
-            "type": "stock_update",
-            "item_id": local_item_id,
-            "new_quantity": quantity,
-            "min_stock_level": threshold,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        cursor.close()
-        connection.close()
-        return True
-        
     except Exception as e:
         logger.error(f"Error syncing specific inventory product {product_id}: {e}")
         return False

@@ -126,7 +126,7 @@ async def get_inventory_product(product_id: int) -> Optional[Dict[str, Any]]:
         url = f"{INVENTORY_BASE_URL}/inventory/inventoryproduct/{product_id}"
         logger.info(f"Fetching product {product_id} from inventory at: {url}")
         
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, timeout=2)  # Reduced timeout from 5 to 2 seconds
         
         if response.status_code == 200:
             return {"success": True, "product": response.json()}
@@ -146,7 +146,7 @@ async def get_ready_made_products() -> Optional[Dict[str, Any]]:
         url = f"{INVENTORY_BASE_URL}/inventory/inventoryproducts/filter?process_type=Ready-Made"
         logger.info(f"Fetching Ready-Made products from inventory at: {url}")
         
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, timeout=2)  # Reduced timeout from 5 to 2 seconds
         
         if response.status_code == 200:
             logger.info(f"Successfully fetched {len(response.json())} Ready-Made products from inventory")

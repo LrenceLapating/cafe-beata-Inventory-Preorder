@@ -103,7 +103,9 @@
   
     position: fixed;
     transition: width 0.3s ease;
-  
+    z-index: 9;
+    top: 80px;
+    height: calc(100vh - 80px);
   }
   
   .sidebar-logo {
