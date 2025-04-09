@@ -78,7 +78,7 @@ app = FastAPI()
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins in development, configure specific domains in production
+    allow_origins=["http://localhost:8080", "http://127.0.0.1:8080"],  # Explicitly allow the frontend origin
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -136,7 +136,7 @@ async def request_password_reset(request: ResetPasswordRequest, background_tasks
 
     # Generate reset token and reset URL
     reset_token = generate_reset_token(email)
-    reset_url = f"http://127.0.0.1:8000/reset-password/{reset_token}"
+    reset_url = f"http://localhost:8080/reset-password/{reset_token}"  # Update to use frontend URL
 
     # Add send_reset_email to background task
     background_tasks.add_task(send_reset_email, email, reset_url)

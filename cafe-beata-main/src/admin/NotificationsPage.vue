@@ -1408,107 +1408,163 @@ export default {
             const { orderId, approved } = data;
             
             if (approved) {
-              console.log(`EMERGENCY FIX: Customer approved order #${orderId} - bypassing Vue completely`);
+              console.log(`CRITICAL FIX: Customer approved order #${orderId} - handling the single-order case specially`);
               
-              // EMERGENCY DIRECT DOM PATCHING - Find and modify the DOM directly
-              // This must work regardless of Vue's reactivity system
+              // Check if this is the single-order case (the problematic case)
+              const isSingleOrder = this.orders.length === 1;
+              
+              // Always try direct DOM manipulation first
               try {
-                // 1. Find the order element by its ID
                 const orderElement = document.querySelector(`.order-item[data-order-id="${orderId}"]`);
-                if (!orderElement) {
-                  console.error(`Could not find order element for order #${orderId}`);
-                  location.reload(); // Force reload as last resort
-                  return;
-                }
-                
-                console.log("Found order element in DOM, applying emergency patch");
-                
-                // 2. Remove the critical class immediately
-                orderElement.classList.remove('order-pending-approval');
-                
-                // 3. Apply a fixed style override directly on the element
-                orderElement.style.backgroundColor = "#ffffff";
-                orderElement.style.borderColor = "#ddd";
-                orderElement.style.borderWidth = "2px";
-                orderElement.style.borderStyle = "solid";
-                orderElement.style.boxShadow = "0 2px 5px rgba(0, 0, 0, 0.1)";
-                
-                // 4. Hide the "PENDING APPROVAL" label which is created via ::before
-                const labelFixStyle = document.createElement('style');
-                labelFixStyle.textContent = `
-                  .order-item[data-order-id="${orderId}"]::before {
-                    display: none !important;
-                  }
-                `;
-                document.head.appendChild(labelFixStyle);
-                
-                // 5. Find all paragraphs in the order
-                const paragraphs = orderElement.querySelectorAll('p');
-                paragraphs.forEach(p => {
-                  // 6. Update the status text
-                  if (p.innerHTML.includes('Status:') && p.innerHTML.includes('Pending Approval')) {
-                    p.innerHTML = '<strong>Status:</strong> pending';
-                  }
-                });
-                
-                // 7. Reset header color if it's red
-                const header = orderElement.querySelector('h3');
-                if (header) {
-                  header.style.color = "#333";
-                }
-                
-                // 8. Find and reset the total price color
-                const totalElement = orderElement.querySelector('.order-total');
-                if (totalElement) {
-                  totalElement.style.color = "#333";
-                }
-                
-                // 9. Apply a success flash animation
-                orderElement.style.animation = "none"; // Reset any existing animation
-                setTimeout(() => {
-                  // Add a flash of green to indicate success
-                  orderElement.style.animation = "successPulse 2s ease";
-                }, 10);
-                
-                // 10. Add a success indicator
-                const successIndicator = document.createElement('div');
-                successIndicator.className = 'approval-success-indicator';
-                successIndicator.innerHTML = '✓ Approved';
-                successIndicator.style.position = 'absolute';
-                successIndicator.style.top = '5px';
-                successIndicator.style.right = '5px';
-                successIndicator.style.backgroundColor = '#4CAF50';
-                successIndicator.style.color = 'white';
-                successIndicator.style.padding = '2px 8px';
-                successIndicator.style.borderRadius = '4px';
-                successIndicator.style.fontSize = '12px';
-                successIndicator.style.fontWeight = 'bold';
-                
-                // Check if indicator already exists
-                if (!orderElement.querySelector('.approval-success-indicator')) {
-                  orderElement.appendChild(successIndicator);
+                if (orderElement) {
+                  console.log("Found order element in DOM, applying direct DOM updates");
                   
-                  // Remove it after a few seconds
-                  setTimeout(() => {
-                    if (successIndicator.parentNode) {
-                      successIndicator.parentNode.removeChild(successIndicator);
+                  // Remove the pending approval class and add all styling inline
+                  orderElement.classList.remove('order-pending-approval');
+                  orderElement.style.backgroundColor = "#ffffff";
+                  orderElement.style.border = "2px solid #ddd";
+                  orderElement.style.boxShadow = "0 2px 5px rgba(0, 0, 0, 0.1)";
+                  
+                  // Hide the PENDING APPROVAL label
+                  const style = document.createElement('style');
+                  style.id = `fix-order-${orderId}`;
+                  style.textContent = `
+                    .order-item[data-order-id="${orderId}"]::before {
+                      display: none !important;
                     }
-                  }, 5000);
+                    .order-item[data-order-id="${orderId}"] h3 {
+                      color: #333 !important;
+                    }
+                    .order-item[data-order-id="${orderId}"] .order-total {
+                      color: #333 !important;
+                    }
+                  `;
+                  document.head.appendChild(style);
+                  
+                  // Update the status text
+                  const statusParagraphs = orderElement.querySelectorAll('p');
+                  for (const paragraph of statusParagraphs) {
+                    if (paragraph.innerHTML.includes('Status:')) {
+                      paragraph.innerHTML = '<strong>Status:</strong> pending';
+                      break;
+                    }
+                  }
                 }
                 
-                // 11. Show notification to admin
-                this.notificationMessage = `The customer has APPROVED the order adjustments. Order ID: ${orderId}`;
-                this.notificationClass = "open-notification";
-                this.showNotification();
-                
-                console.log("Emergency DOM patching completed successfully");
+                // For the single-order case, recreate the entire orders container
+                if (isSingleOrder) {
+                  console.log("Single order detected - using special handling");
+                  
+                  // 1. Get the order container
+                  const ordersContainer = document.querySelector('.orders-container');
+                  if (!ordersContainer) {
+                    console.error("Orders container not found");
+                    return;
+                  }
+                  
+                  // 2. Find the order in our data
+                  const order = this.orders.find(o => o.id === orderId);
+                  if (!order) {
+                    console.error("Order not found in data");
+                    return;
+                  }
+                  
+                  // 3. Create an updated version of the order without pending approval
+                  const updatedOrder = { ...order, isPendingApproval: false };
+                  
+                  // 4. Replace the entire orders list HTML
+                  const ordersList = ordersContainer.querySelector('.orders-list');
+                  if (!ordersList) {
+                    console.error("Orders list not found");
+                    return;
+                  }
+                  
+                  // Create a new order item element 
+                  const newOrderItemHTML = `
+                    <div class="order-item" data-order-id="${updatedOrder.id}">
+                      <div class="order-details">
+                        <h3>Order ID: ${updatedOrder.id}</h3>
+                        <p><strong>Customer:</strong> ${updatedOrder.customer_name}</p>
+                        <p><strong>Status:</strong> ${updatedOrder.status}</p>
+                        <p><strong>Time Order:</strong> ${this.timeAgo(updatedOrder.created_at)}</p>
+                        
+                        <div class="items-section">
+                          <strong>Items:</strong>
+                          <ul>
+                            ${updatedOrder.items.map(item => 
+                              `<li>${item.name} - ₱${item.price} x ${item.quantity}</li>`
+                            ).join('')}
+                          </ul>
+                        </div>
+                        
+                        <div class="order-total">
+                          <p><strong>Total Amount: ₱${this.calculateOrderTotal(updatedOrder.items)}</strong></p>
+                        </div>
+                      </div>
+                      
+                      <div class="order-actions">
+                        <button 
+                          onclick="document.dispatchEvent(new CustomEvent('completion-confirmation', {detail: {orderId: ${updatedOrder.id}}}))"
+                          class="mark-completed-btn small-btn ${!this.orderReadyStatus[updatedOrder.id] ? 'disabled' : ''}"
+                          ${!this.orderReadyStatus[updatedOrder.id] ? 'disabled' : ''}
+                        >
+                          Mark as Completed
+                        </button>
+                        
+                        <button 
+                          onclick="document.dispatchEvent(new CustomEvent('order-ready', {detail: {orderId: ${updatedOrder.id}, customerName: '${updatedOrder.customer_name}'}}))"
+                          class="order-ready-btn small-btn"
+                        >
+                          Order Ready 🔔
+                        </button>
+                        
+                        <button 
+                          onclick="document.dispatchEvent(new CustomEvent('decline-dialog', {detail: {orderId: ${updatedOrder.id}}}))"
+                          class="decline-btn"
+                        >
+                          Decline
+                        </button>
+                      </div>
+                    </div>
+                  `;
+                  
+                  // Replace the content
+                  ordersList.innerHTML = newOrderItemHTML;
+                  
+                  // Setup event listeners for our custom events
+                  if (!this._customListenersAdded) {
+                    document.addEventListener('completion-confirmation', (e) => {
+                      this.showCompletionConfirmation(e.detail.orderId);
+                    });
+                    
+                    document.addEventListener('order-ready', (e) => {
+                      this.sendOrderReadyNotification(e.detail.orderId, e.detail.customerName, updatedOrder.items);
+                    });
+                    
+                    document.addEventListener('decline-dialog', (e) => {
+                      // Find the order again since we need the full object
+                      const order = this.orders.find(o => o.id === e.detail.orderId);
+                      if (order) {
+                        this.openDeclineDialog(order);
+                      }
+                    });
+                    
+                    this._customListenersAdded = true;
+                  }
+                  
+                  // Also update our Vue data model
+                  this.orders = [updatedOrder];
+                }
               } catch (error) {
-                console.error("Error during emergency DOM patching:", error);
-                // Last resort - force a page reload
-                location.reload();
+                console.error("Error during direct DOM manipulation:", error);
               }
               
-              // Also update the database silently in the background
+              // Always show notification to admin
+              this.notificationMessage = `The customer has APPROVED the order adjustments. Order ID: ${orderId}`;
+              this.notificationClass = "open-notification";
+              this.showNotification();
+              
+              // Update the database in the background
               fetch(`http://127.0.0.1:8000/orders/${orderId}/update-items`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
@@ -1520,15 +1576,20 @@ export default {
               .then(response => response.json())
               .then(data => {
                 console.log("Database updated to reflect customer approval:", data);
+                
+                // Always fetch all orders as a fallback
+                setTimeout(() => {
+                  this.fetchPendingOrders();
+                }, 1000);
               })
               .catch(err => {
                 console.error("Error updating database after customer approval:", err);
+                
+                // Force reload as last resort for error cases
+                if (isSingleOrder) {
+                  setTimeout(() => location.reload(), 1000);
+                }
               });
-              
-              // Final safety net - refresh the orders list after a delay
-              setTimeout(() => {
-                this.fetchPendingOrders();
-              }, 3000);
             } else {
               // If declined, handle in Vue since that part seems to work
               this.orders = this.orders.filter(o => o.id !== orderId);
