@@ -472,6 +472,14 @@ async def get_orders(status: Optional[str] = "pending", customer_name: Optional[
                 order["items"] = json.loads(order["items"])  
         except json.JSONDecodeError:
             order["items"] = []  
+        
+        # Convert isPendingApproval to boolean for JSON serialization
+        if "isPendingApproval" in order:
+            # Handle different database representations (some DBs return 1/0, some True/False)
+            order["isPendingApproval"] = bool(order["isPendingApproval"])
+        else:
+            # Default to False if column doesn't exist yet
+            order["isPendingApproval"] = False
 
     cursor.close()
     connection.close()
@@ -1668,6 +1676,33 @@ async def sync_inventory_products_background():
 
 @app.on_event("startup")
 async def startup_event():
+    # Check and update the orderso table to include isPendingApproval column
+    try:
+        connection = get_db_connection()
+        cursor = connection.cursor()
+        
+        # Check if isPendingApproval column exists in orderso table
+        cursor.execute("""
+            SELECT COUNT(*) FROM information_schema.columns 
+            WHERE table_schema = 'cafe_beata' 
+            AND table_name = 'orderso' 
+            AND column_name = 'isPendingApproval'
+        """)
+        
+        if cursor.fetchone()[0] == 0:
+            # Add isPendingApproval column to orderso table
+            cursor.execute("""
+                ALTER TABLE orderso 
+                ADD COLUMN isPendingApproval BOOLEAN DEFAULT FALSE
+            """)
+            connection.commit()
+            logger.info("Added isPendingApproval column to orderso table")
+        
+        cursor.close()
+        connection.close()
+    except Exception as e:
+        logger.error(f"Error updating orderso table: {e}")
+    
     # Start background task for periodic stock synchronization
     logger.info("Starting background stock sync task...")
     try:
@@ -2267,3 +2302,73 @@ async def sync_specific_inventory_product(product_id: int):
     except Exception as e:
         logger.error(f"Error syncing specific inventory product {product_id}: {e}")
         return False
+
+@app.put("/orders/{order_id}/update-items")
+async def update_order_items(order_id: int, request: dict):
+    """
+    Update the items in an order with adjusted quantities and set isPendingApproval flag
+    """
+    connection = None
+    cursor = None
+    try:
+        # Connect to the database
+        connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
+        
+        # Print debug info
+        print(f"Received request for order_id: {order_id}")
+        print(f"Request data: {request}")
+        
+        # Verify if the order exists
+        cursor.execute("SELECT * FROM orderso WHERE id = %s", (order_id,))
+        order = cursor.fetchone()
+        
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+            
+        print(f"Found order: {order}")
+        
+        # Extract the updated items, status, and isPendingApproval flag from the request
+        items = request.get("items", [])
+        status = request.get("status", "pending")
+        is_pending_approval = request.get("isPendingApproval", False)
+        
+        print(f"Items to update: {items}")
+        
+        # Calculate the new total
+        total_amount = sum(item["price"] * item["quantity"] for item in items)
+        print(f"Calculated total amount: {total_amount}")
+        
+        # First, update the orderso table with status and isPendingApproval
+        cursor.execute(
+            "UPDATE orderso SET status = %s, isPendingApproval = %s WHERE id = %s",
+            (status, is_pending_approval, order_id)
+        )
+        print("Updated order status and isPendingApproval")
+        
+        # Then, update the items - store as JSON in the orderso table
+        items_json = json.dumps(items)
+        cursor.execute(
+            "UPDATE orderso SET items = %s WHERE id = %s",
+            (items_json, order_id)
+        )
+        print("Updated order items as JSON")
+        
+        # Commit the transaction
+        connection.commit()
+        print("Transaction committed successfully")
+        
+        return {"success": True, "message": "Order items updated successfully"}
+    
+    except Exception as e:
+        # Log the error for debugging
+        print(f"Error updating order items: {str(e)}")
+        if connection:
+            connection.rollback()
+        raise HTTPException(status_code=500, detail=f"Error updating order: {str(e)}")
+    
+    finally:
+        if cursor:
+            cursor.close()
+        if connection and connection.is_connected():
+            connection.close()

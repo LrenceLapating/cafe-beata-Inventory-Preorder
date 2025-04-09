@@ -91,11 +91,18 @@
         <div v-if="filteredOrders.length && !isLoading" class="orders-container">
           <h2>Pending Orders</h2>
           <div class="orders-list">
-            <div class="order-item" v-for="order in filteredOrders" :key="order.id">
+            <div class="order-item" 
+              v-for="order in filteredOrders" 
+              :key="order.id" 
+              :data-order-id="order.id"
+              :class="{
+                'order-declined-state': activeDeclineOrderId === order.id,
+                'order-pending-approval': order.isPendingApproval
+              }">
               <div class="order-details">
                 <h3>Order ID: {{ order.id }}</h3>
                 <p><strong>Customer:</strong> {{ order.customer_name }}</p>
-                <p><strong>Status:</strong> {{ order.status }}</p>
+                <p><strong>Status:</strong> {{ order.status }}{{ order.isPendingApproval ? ' (Pending Approval)' : '' }}</p>
                 <p><strong>Time Order: </strong> {{ timeAgo(order.created_at) }}</p> <!-- Time Ago Display -->
 
                 <div class="items-section">
@@ -136,21 +143,6 @@
                 <button @click="openDeclineDialog(order)" class="decline-btn">
                   Decline
                 </button>
-              </div>
-
-              <!-- Custom message input for decline -->
-              <div v-if="order.id === activeDeclineOrderId" class="decline-container">
-                <textarea v-model="customDeclineMessage" placeholder="Customize your message here..." rows="3" ref="declineText"></textarea>
-                
-                <!-- Button Container -->
-                <div class="decline-buttons">
-                  <button @click="declineOrder(order.id, order.customer_name, order.items)" class="decline-submit-btn">
-                    Submit
-                  </button>
-                  <button @click="activeDeclineOrderId = null" class="decline-cancel-btn">
-                    Cancel
-                  </button>
-                </div>
               </div>
             </div>
           </div>
@@ -297,6 +289,71 @@
             </div>
           </div>
         </div>
+
+        <!-- Decline Modal -->
+        <div v-if="showDeclineModal" class="decline-modal-overlay">
+          <div class="decline-modal-content">
+            <div class="decline-modal-header">
+              <h3>Order Adjustment</h3>
+              <button @click="closeDeclineModal" class="close-modal-btn">✕</button>
+      </div>
+            <div class="decline-modal-body">
+              <p><strong>Order ID:</strong> {{ selectedOrder?.id }}</p>
+              <p><strong>Customer:</strong> {{ selectedOrder?.customer_name }}</p>
+              
+              <!-- Customized Message -->
+              <div class="form-group">
+                <label>Message to Customer:</label>
+                <textarea 
+                  v-model="customDeclineMessage" 
+                  placeholder="Enter a message explaining the changes..." 
+                  rows="3"
+                ></textarea>
+              </div>
+              
+              <!-- Edit Item Quantities -->
+              <div class="form-group">
+                <label>Adjust Item Quantities:</label>
+                <div class="items-adjustment">
+                  <div v-for="(item, index) in editableItems" :key="index" class="item-adjust-row">
+                    <span class="item-name">{{ item.name }}</span>
+                    <div class="quantity-controls">
+                      <button @click="decrementQuantity(index)" :disabled="item.quantity <= 0">-</button>
+                      <input type="number" v-model.number="item.quantity" min="0">
+                      <button @click="incrementQuantity(index)">+</button>
+                    </div>
+                    <span class="item-price">₱{{ (item.price * item.quantity).toFixed(2) }}</span>
+                  </div>
+                </div>
+                <p class="adjusted-total"><strong>Adjusted Total:</strong> ₱{{ calculateAdjustedTotal() }}</p>
+              </div>
+              
+              <!-- Action Buttons -->
+              <div class="decline-modal-actions">
+                <button 
+                  @click="sendForApproval" 
+                  class="send-approval-btn"
+                  :disabled="isUpdating"
+                >
+                  <span v-if="isUpdating">
+                    <i class="fas fa-spinner fa-spin"></i> Updating...
+                  </span>
+                  <span v-else>Send for Approval</span>
+                </button>
+                <button 
+                  @click="confirmDecline" 
+                  class="confirm-decline-btn"
+                  :disabled="isUpdating"
+                >
+                  <span v-if="isUpdating">
+                    <i class="fas fa-spinner fa-spin"></i> Declining...
+                  </span>
+                  <span v-else>Declined</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -337,6 +394,13 @@ export default {
       stockUpdateReason: '',
       selectedCategory: '',
       uniqueCategories: [],
+      // New properties for decline modal
+      showDeclineModal: false,
+      selectedOrder: null,
+      editableItems: [],
+      refreshInterval: null, // To store the interval ID for automatic refresh
+      isUpdating: false, // New property for loading state
+      pingInterval: null, // To store the interval ID for periodic ping
     };
   },
   computed: {
@@ -468,7 +532,7 @@ export default {
         const data = await response.json();
         if (data.orders && Array.isArray(data.orders)) {
           // Filter pending orders and sort them by ID in ascending order
-          this.orders = data.orders
+          const pendingOrders = data.orders
             .filter(order => order.status === "pending")
             .sort((a, b) => {
               // Convert order IDs to numbers for proper numerical sorting
@@ -476,6 +540,11 @@ export default {
               const idB = parseInt(b.id);
               return idA - idB; // Sort in ascending order (lower IDs first)
             });
+          
+          console.log(`Fetched ${pendingOrders.length} pending orders`);
+          
+          // Important: Create a new array reference to ensure Vue reactivity
+          this.orders = [...pendingOrders];
           
           // Check if any of the fetched orders have ready notifications
           // This ensures the "Mark as Completed" button is enabled for orders that are ready
@@ -497,6 +566,9 @@ export default {
           
           // Update localStorage with any changes
           localStorage.setItem('orderReadyStatus', JSON.stringify(this.orderReadyStatus));
+          
+          // Force the UI to update
+          this.$forceUpdate();
         } else {
           console.error("Invalid data format", data);
           this.orders = [];
@@ -619,13 +691,266 @@ export default {
         });
     },
 
-    // Open the custom decline message input for a specific order
+    // Open the decline modal for a specific order
     openDeclineDialog(order) {
       this.activeDeclineOrderId = order.id;
-      this.customDeclineMessage = localStorage.getItem(`customDeclineMessage_${order.id}`) || ""; // Get saved message from localStorage
+      this.selectedOrder = order;
+      this.customDeclineMessage = localStorage.getItem(`customDeclineMessage_${order.id}`) || "We need to adjust your order due to availability issues.";
+      
+      // Clone the items array to make it editable
+      this.editableItems = JSON.parse(JSON.stringify(order.items));
+      
+      // Show the modal
+      this.showDeclineModal = true;
     },
 
-    // Decline an order and send notification with custom message
+    // Close the decline modal
+    closeDeclineModal() {
+      this.showDeclineModal = false;
+      this.activeDeclineOrderId = null;
+      this.selectedOrder = null;
+    },
+
+    // Increment item quantity
+    incrementQuantity(index) {
+      this.editableItems[index].quantity++;
+    },
+
+    // Decrement item quantity
+    decrementQuantity(index) {
+      if (this.editableItems[index].quantity > 0) {
+        this.editableItems[index].quantity--;
+      }
+    },
+
+    // Calculate the total of adjusted items
+    calculateAdjustedTotal() {
+      return this.editableItems.reduce((sum, item) => sum + (item.price * item.quantity), 0).toFixed(2);
+    },
+
+    // Send order adjustment for customer approval
+    sendForApproval() {
+      if (!this.selectedOrder) return;
+      
+      const orderId = this.selectedOrder.id;
+      const customerName = this.selectedOrder.customer_name;
+      
+      // Calculate the total price
+      const total = this.calculateAdjustedTotal();
+      
+      // Format items for display
+      const formattedItems = this.formatItems(this.editableItems);
+      
+      // Build a more specific message about quantity adjustments
+      let adjustmentReasons = [];
+      this.editableItems.forEach((item) => {
+        const originalItem = this.selectedOrder.items.find(i => i.name === item.name);
+        if (originalItem && originalItem.quantity !== item.quantity) {
+          adjustmentReasons.push(`${item.name} adjusted from ${originalItem.quantity} to ${item.quantity} due to limited availability`);
+        }
+      });
+      
+      // Create the customized message with specific quantity adjustment reasons
+      const specificAdjustments = adjustmentReasons.length > 0 
+        ? `The following adjustments were made: ${adjustmentReasons.join('; ')}. ` 
+        : '';
+        
+      // Prepare notification message with approval buttons
+      const message = `${this.customDeclineMessage} ${specificAdjustments}Please review the adjusted order: ${formattedItems}. Total: ₱${total}`;
+      
+      // Create adjustment notification with approval options
+      const notification = {
+        orderId,
+        customerName,
+        message,
+        timestamp: new Date().toISOString(),
+        items: this.editableItems,
+        total,
+        requiresApproval: true,  // Flag to indicate this needs user approval
+        originalItems: this.selectedOrder.items  // Store original items for reference
+      };
+      
+      // Set loading state
+      this.isUpdating = true;
+      
+      // First update the order in the database with the adjusted quantities
+      fetch(`http://127.0.0.1:8000/orders/${orderId}/update-items`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: this.editableItems,
+          status: "pending",  // Keep status as pending
+          isPendingApproval: true // Add flag for pending approval
+        })
+      })
+      .then(response => {
+        if (!response.ok) {
+          return response.text().then(text => {
+            console.error(`Error status: ${response.status}, details: ${text}`);
+            throw new Error(`Failed to update order (${response.status}): ${text}`);
+          });
+        }
+        return response.json();
+      })
+      .then((data) => {
+        console.log("Order items updated in database successfully", data);
+        
+        // Now save to user's notifications
+        const userNotificationsKey = `user_notifications_${customerName}`;
+        let notifications = JSON.parse(localStorage.getItem(userNotificationsKey)) || [];
+        notifications.push(notification);
+        localStorage.setItem(userNotificationsKey, JSON.stringify(notifications));
+        
+        // Send WebSocket notification if connected
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({
+            type: 'user_notification',
+            action: 'order_adjustment',  // Set specific action type for adjustment requests
+            notification: notification,
+            target_user: customerName
+          }));
+        }
+        
+        // Update the order in the UI immediately to show adjusted quantities
+        const orderIndex = this.orders.findIndex(o => o.id === orderId);
+        if (orderIndex !== -1) {
+          // Create a copy with adjusted items
+          const updatedOrder = {
+            ...this.orders[orderIndex],
+            items: this.editableItems,
+            isPendingApproval: true // Add flag for styling
+          };
+          
+          // Update the order in the list - using Vue 3 array mutation
+          this.orders = [
+            ...this.orders.slice(0, orderIndex),
+            updatedOrder,
+            ...this.orders.slice(orderIndex + 1)
+          ];
+        }
+        
+        // Show confirmation
+        this.notificationMessage = "Adjustment request sent to customer for approval!";
+        this.notificationClass = "success-notification";
+        this.showNotification();
+        
+        // Close the modal and reset loading state
+        this.isUpdating = false;
+        this.closeDeclineModal();
+      })
+      .catch(error => {
+        console.error("Error updating order items:", error);
+        
+        // Reset loading state but keep modal open for retry
+        this.isUpdating = false;
+        
+        // Show error notification
+        this.notificationMessage = `Error: ${error.message}`;
+        this.notificationClass = "error-notification";
+        this.showNotification();
+        
+        // Ask user if they want to retry via modal or notification
+        if (confirm(`Failed to update order: ${error.message}. Do you want to retry?`)) {
+          // Retry the update
+          this.sendForApproval();
+        }
+      });
+    },
+
+    // Decline the order directly
+    confirmDecline() {
+      if (!this.selectedOrder) return;
+      
+      // Show loading indicator
+      this.isUpdating = true;
+      
+      const orderId = this.selectedOrder.id;
+      const customerName = this.selectedOrder.customer_name;
+      const items = this.selectedOrder.items;
+      const message = this.customDeclineMessage || "Unfortunately, this item is temporarily out of stock. We apologize for the inconvenience and appreciate your patience. 🙏";
+      
+      fetch(`http://127.0.0.1:8000/orders/${orderId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "declined" })
+      })
+      .then(response => {
+        if (!response.ok) {
+          throw new Error(`HTTP error! Status: ${response.status}`);
+        }
+        return response.json();
+      })
+      .then(() => {
+        // Remove from pending orders immediately
+        this.orders = this.orders.filter(order => order.id !== orderId);
+        
+        // Remove from orderReadyStatus if it exists
+        if (this.orderReadyStatus[orderId]) {
+          delete this.orderReadyStatus[orderId];
+          localStorage.setItem('orderReadyStatus', JSON.stringify(this.orderReadyStatus));
+        }
+        
+        // Calculate total
+        const total = items.reduce((sum, item) => sum + item.price * item.quantity, 0).toFixed(2);
+        
+        // Prepare notification
+        const notification = {
+          orderId,
+          customerName,
+          message: `${message} Order details: ${this.formatItems(items)}. Total: ₱${total}`,
+          timestamp: new Date().toISOString(),
+          items, 
+          total,
+        };
+        
+        // Save notification to localStorage
+        const userNotificationsKey = `user_notifications_${customerName}`;
+        let notifications = JSON.parse(localStorage.getItem(userNotificationsKey)) || [];
+        notifications.push(notification);
+        localStorage.setItem(userNotificationsKey, JSON.stringify(notifications));
+        
+        // Send direct WebSocket notification for real-time updates
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          console.log('Sending WebSocket notification for declined order:', orderId);
+          
+          // First send the standard notification
+          this.ws.send(JSON.stringify({
+            type: 'user_notification',
+            action: 'order_declined',
+            notification: notification,
+            target_user: customerName
+          }));
+          
+          // Then send a special order_declined type message for real-time notification
+          this.ws.send(JSON.stringify({
+            type: 'order_declined',
+            order_id: orderId,
+            customer_name: customerName,
+            reason: message,
+            timestamp: new Date().toISOString()
+          }));
+        }
+        
+        // Reset loading state
+        this.isUpdating = false;
+        
+        // Close the modal
+        this.closeDeclineModal();
+        
+        // Show success message
+        this.notificationMessage = `Order #${orderId} has been declined`;
+        this.notificationClass = "closed-notification";
+        this.showNotification();
+        
+      })
+      .catch(error => {
+        console.error("Error declining order:", error);
+        this.isUpdating = false;
+        alert("Error declining order. Please try again.");
+      });
+    },
+
+    // Original decline order function - unchanged
     declineOrder(orderId, customerName, items) {
       const message = this.customDeclineMessage || "Unfortunately, this item is temporarily out of stock. We apologize for the inconvenience and appreciate your patience. 🙏";
 
@@ -670,17 +995,41 @@ export default {
           notifications.push(notification);
           localStorage.setItem(userNotificationsKey, JSON.stringify(notifications));
 
+          // Send direct WebSocket notification for real-time updates
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            console.log('Sending WebSocket notification for declined order:', orderId);
+            
+            // First send the standard notification
+            this.ws.send(JSON.stringify({
+              type: 'user_notification',
+              action: 'order_declined',
+              notification: notification,
+              target_user: customerName
+            }));
+            
+            // Then send a special order_declined type message for real-time notification
+            this.ws.send(JSON.stringify({
+              type: 'order_declined',
+              order_id: orderId,
+              customer_name: customerName,
+              reason: message,
+              timestamp: new Date().toISOString()
+            }));
+          }
+
           // Emit an event to notify other components (optional)
           window.dispatchEvent(new Event("orderDeclined"));
 
-          alert("Order has been declined!");
+          // Show success message
+          this.notificationMessage = `Order #${orderId} has been declined`;
+          this.notificationClass = "closed-notification";
+          this.showNotification();
         })
-        .catch(error => console.error("Error declining order:", error));
-
-      // Reset after submission
-      this.activeDeclineOrderId = null;
-      this.customDeclineMessage = "";
-      localStorage.removeItem(`customDeclineMessage_${orderId}`); // Clear message from localStorage after submission
+        .catch(error => {
+          console.error("Error declining order:", error);
+          this.isUpdating = false;
+          alert("Error declining order. Please try again.");
+        });
     },
 
     // Save the decline message to localStorage whenever it's updated
@@ -941,11 +1290,30 @@ export default {
     initWebSocket() {
       // Use the same host as the API
       const wsUrl = `ws://${window.location.hostname}:8000/ws/orders`;
+      
+      // Close existing connection if it exists
+      if (this.ws) {
+        try {
+          this.ws.close();
+        } catch (e) {
+          console.error("Error closing existing WebSocket:", e);
+        }
+      }
+      
+      console.log('Initializing WebSocket connection...');
       this.ws = new WebSocket(wsUrl);
       
       this.ws.onopen = () => {
         console.log('WebSocket connected');
         this.wsConnected = true;
+        
+        // Set up a periodic ping to keep the connection alive
+        if (this.pingInterval) clearInterval(this.pingInterval);
+        this.pingInterval = setInterval(() => {
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 30000); // ping every 30 seconds
       };
       
       this.ws.onmessage = async (event) => {
@@ -977,6 +1345,198 @@ export default {
                 // Update localStorage
                 localStorage.setItem('orderReadyStatus', JSON.stringify(this.orderReadyStatus));
               }
+            }
+          } else if (data.type === 'admin_notification') {
+            // Handle customer responses to order adjustments
+            if (data.action === 'adjustment_response') {
+              // Process the customer's response to an order adjustment
+              const notification = data.notification;
+              const orderId = notification.orderId;
+              
+              if (notification.message.includes('APPROVED')) {
+                // Find the order and update it with adjusted items
+                const orderIndex = this.orders.findIndex(o => o.id === orderId);
+                if (orderIndex !== -1) {
+                  // Update the order with the adjusted items and remove pending approval flag
+                  const updatedOrder = {
+                    ...this.orders[orderIndex],
+                    items: notification.items,
+                    isPendingApproval: false // Remove the pending approval flag
+                  };
+                  
+                  // Update using Vue 3 reactivity 
+                  this.orders = [
+                    ...this.orders.slice(0, orderIndex),
+                    updatedOrder,
+                    ...this.orders.slice(orderIndex + 1)
+                  ];
+                  
+                  // Show success notification
+                  this.notificationMessage = `Customer has approved order adjustments for Order #${orderId}`;
+                  this.notificationClass = "open-notification";
+                  this.showNotification();
+                }
+              } else if (notification.message.includes('DECLINED')) {
+                // Remove the order from the list if customer declined
+                this.orders = this.orders.filter(o => o.id !== orderId);
+                
+                // Show declined notification
+                this.notificationMessage = `Customer has declined order adjustments for Order #${orderId}`;
+                this.notificationClass = "closed-notification";
+                this.showNotification();
+              }
+              
+              // Mark the notification as processed
+              notification.processed = true;
+              
+              // Update the notification in localStorage
+              const adminNotificationsKey = 'user_notifications_Admin';
+              let adminNotifications = JSON.parse(localStorage.getItem(adminNotificationsKey)) || [];
+              
+              // Find and update the processed notification
+              const notificationIndex = adminNotifications.findIndex(n => 
+                n.isAdminNotification && n.orderId === orderId && !n.processed
+              );
+              
+              if (notificationIndex !== -1) {
+                adminNotifications[notificationIndex].processed = true;
+                localStorage.setItem(adminNotificationsKey, JSON.stringify(adminNotifications));
+              }
+            }
+          } else if (data.type === 'customer_approval') {
+            // Direct customer approval handling for real-time updates
+            const { orderId, approved } = data;
+            
+            if (approved) {
+              console.log(`EMERGENCY FIX: Customer approved order #${orderId} - bypassing Vue completely`);
+              
+              // EMERGENCY DIRECT DOM PATCHING - Find and modify the DOM directly
+              // This must work regardless of Vue's reactivity system
+              try {
+                // 1. Find the order element by its ID
+                const orderElement = document.querySelector(`.order-item[data-order-id="${orderId}"]`);
+                if (!orderElement) {
+                  console.error(`Could not find order element for order #${orderId}`);
+                  location.reload(); // Force reload as last resort
+                  return;
+                }
+                
+                console.log("Found order element in DOM, applying emergency patch");
+                
+                // 2. Remove the critical class immediately
+                orderElement.classList.remove('order-pending-approval');
+                
+                // 3. Apply a fixed style override directly on the element
+                orderElement.style.backgroundColor = "#ffffff";
+                orderElement.style.borderColor = "#ddd";
+                orderElement.style.borderWidth = "2px";
+                orderElement.style.borderStyle = "solid";
+                orderElement.style.boxShadow = "0 2px 5px rgba(0, 0, 0, 0.1)";
+                
+                // 4. Hide the "PENDING APPROVAL" label which is created via ::before
+                const labelFixStyle = document.createElement('style');
+                labelFixStyle.textContent = `
+                  .order-item[data-order-id="${orderId}"]::before {
+                    display: none !important;
+                  }
+                `;
+                document.head.appendChild(labelFixStyle);
+                
+                // 5. Find all paragraphs in the order
+                const paragraphs = orderElement.querySelectorAll('p');
+                paragraphs.forEach(p => {
+                  // 6. Update the status text
+                  if (p.innerHTML.includes('Status:') && p.innerHTML.includes('Pending Approval')) {
+                    p.innerHTML = '<strong>Status:</strong> pending';
+                  }
+                });
+                
+                // 7. Reset header color if it's red
+                const header = orderElement.querySelector('h3');
+                if (header) {
+                  header.style.color = "#333";
+                }
+                
+                // 8. Find and reset the total price color
+                const totalElement = orderElement.querySelector('.order-total');
+                if (totalElement) {
+                  totalElement.style.color = "#333";
+                }
+                
+                // 9. Apply a success flash animation
+                orderElement.style.animation = "none"; // Reset any existing animation
+                setTimeout(() => {
+                  // Add a flash of green to indicate success
+                  orderElement.style.animation = "successPulse 2s ease";
+                }, 10);
+                
+                // 10. Add a success indicator
+                const successIndicator = document.createElement('div');
+                successIndicator.className = 'approval-success-indicator';
+                successIndicator.innerHTML = '✓ Approved';
+                successIndicator.style.position = 'absolute';
+                successIndicator.style.top = '5px';
+                successIndicator.style.right = '5px';
+                successIndicator.style.backgroundColor = '#4CAF50';
+                successIndicator.style.color = 'white';
+                successIndicator.style.padding = '2px 8px';
+                successIndicator.style.borderRadius = '4px';
+                successIndicator.style.fontSize = '12px';
+                successIndicator.style.fontWeight = 'bold';
+                
+                // Check if indicator already exists
+                if (!orderElement.querySelector('.approval-success-indicator')) {
+                  orderElement.appendChild(successIndicator);
+                  
+                  // Remove it after a few seconds
+                  setTimeout(() => {
+                    if (successIndicator.parentNode) {
+                      successIndicator.parentNode.removeChild(successIndicator);
+                    }
+                  }, 5000);
+                }
+                
+                // 11. Show notification to admin
+                this.notificationMessage = `The customer has APPROVED the order adjustments. Order ID: ${orderId}`;
+                this.notificationClass = "open-notification";
+                this.showNotification();
+                
+                console.log("Emergency DOM patching completed successfully");
+              } catch (error) {
+                console.error("Error during emergency DOM patching:", error);
+                // Last resort - force a page reload
+                location.reload();
+              }
+              
+              // Also update the database silently in the background
+              fetch(`http://127.0.0.1:8000/orders/${orderId}/update-items`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  status: "pending",
+                  isPendingApproval: false
+                })
+              })
+              .then(response => response.json())
+              .then(data => {
+                console.log("Database updated to reflect customer approval:", data);
+              })
+              .catch(err => {
+                console.error("Error updating database after customer approval:", err);
+              });
+              
+              // Final safety net - refresh the orders list after a delay
+              setTimeout(() => {
+                this.fetchPendingOrders();
+              }, 3000);
+            } else {
+              // If declined, handle in Vue since that part seems to work
+              this.orders = this.orders.filter(o => o.id !== orderId);
+              
+              // Show notification about the decline
+              this.notificationMessage = `Customer has declined order adjustments for Order #${orderId}`;
+              this.notificationClass = "closed-notification";
+              this.showNotification();
             }
           } else if (data.type === 'stock_update') {
             // Handle stock update
@@ -1046,32 +1606,296 @@ export default {
         this.wsConnected = false;
       };
     },
+
+    // Handle localStorage changes for admin notifications
+    handleStorageEvent(event) {
+      // Check if the storage event is for admin notifications
+      if (event.key === 'user_notifications_Admin') {
+        // Process new admin notifications
+        this.processAdminNotifications();
+      }
+    },
+    
+    // Process admin notifications from localStorage
+    processAdminNotifications() {
+      // Get admin notifications 
+      const adminNotificationsKey = 'user_notifications_Admin';
+      const adminNotifications = JSON.parse(localStorage.getItem(adminNotificationsKey)) || [];
+      
+      // Check for unprocessed customer response notifications
+      const unprocessedNotifications = adminNotifications.filter(n => 
+        n.isAdminNotification && 
+        (n.message.includes('APPROVED') || n.message.includes('DECLINED')) && 
+        !n.processed
+      );
+      
+      // Process each notification
+      unprocessedNotifications.forEach(notification => {
+        const orderId = notification.orderId;
+        
+        if (notification.message.includes('APPROVED')) {
+          // If customer approved adjustments
+          // Find the order and update it
+          const orderIndex = this.orders.findIndex(o => o.id === orderId);
+          
+          if (orderIndex !== -1) {
+            // Update the order with adjusted items
+            this.orders[orderIndex].items = notification.items;
+            
+            // Mark the notification as processed
+            notification.processed = true;
+          }
+        } else if (notification.message.includes('DECLINED')) {
+          // If customer declined, remove the order
+          this.orders = this.orders.filter(o => o.id !== orderId);
+          
+          // Mark the notification as processed
+          notification.processed = true;
+        }
+      });
+      
+      // Update the processed notifications in localStorage
+      localStorage.setItem(adminNotificationsKey, JSON.stringify(adminNotifications));
+      
+      // Show notification to admin about the response
+      if (unprocessedNotifications.length > 0) {
+        const lastNotification = unprocessedNotifications[unprocessedNotifications.length - 1];
+        this.notificationMessage = lastNotification.message;
+        this.notificationClass = lastNotification.message.includes('APPROVED') ? 
+          'open-notification' : 'closed-notification';
+        this.showNotification();
+      }
+    },
+    
+    // Fetch pending orders - wrapper for fetchOrders for consistency
+    fetchPendingOrders() {
+      this.fetchOrders();
+    },
+    
+    // Connect to WebSocket - renamed from initWebSocket for consistency
+    connectWebSocket() {
+      this.initWebSocket();
+    },
+
+    // Add this method to force refresh orders after WebSocket updates
+    forceRefreshOrder(orderId) {
+      console.log(`Forcing refresh for order #${orderId}, current orders count: ${this.orders.length}`);
+      
+      // Find the order that needs refreshing
+      const orderIndex = this.orders.findIndex(o => o.id === orderId);
+      
+      if (orderIndex !== -1) {
+        // Fetch the latest order data from the server to ensure it's up to date
+        fetch(`http://127.0.0.1:8000/orders/${orderId}`)
+          .then(response => response.json())
+          .then(data => {
+            if (data) {
+              console.log('Fetched fresh order data for real-time update:', data);
+              
+              // Create a fresh order object with the latest data
+              const updatedOrder = {
+                ...data,
+                isPendingApproval: data.isPendingApproval || false // Ensure the flag is set correctly
+              };
+              
+              // Special handling for single order
+              if (this.orders.length === 1) {
+                this.orders = [updatedOrder];
+              } else {
+                // Replace the order in the array using Vue reactivity
+                this.orders = [
+                  ...this.orders.slice(0, orderIndex),
+                  updatedOrder,
+                  ...this.orders.slice(orderIndex + 1)
+                ];
+              }
+              
+              // Force the component to re-render
+              this.$forceUpdate();
+              
+              console.log('Order updated successfully in UI:', updatedOrder);
+              
+              // If order is approved but UI doesn't update, try refreshing all orders
+              if (!updatedOrder.isPendingApproval) {
+                setTimeout(() => {
+                  this.fetchPendingOrders();
+                }, 300);
+              }
+            }
+          })
+          .catch(error => {
+            console.error('Error refreshing order:', error);
+            // Fallback to refreshing all orders on error
+            this.fetchPendingOrders();
+          });
+      } else {
+        console.log(`Order #${orderId} not found in current orders, refreshing all orders`);
+        // If the order isn't found in the current array, refresh all orders
+        this.fetchPendingOrders();
+      }
+    },
+
+    // Add direct DOM manipulation method to fix pending approval status when reactivity fails
+    forceFixPendingUI(orderId) {
+      console.log(`CRITICAL FIX: Using direct DOM manipulation to fix UI for order #${orderId}`);
+      
+      try {
+        // Find the order element
+        const orderElement = document.querySelector(`.order-item[data-order-id="${orderId}"]`);
+        if (!orderElement) {
+          console.log("Order element not found for direct fix");
+          return false;
+        }
+        
+        // Remove the critical class that causes the red border
+        orderElement.classList.remove('order-pending-approval');
+        
+        // Add a success indicator class
+        orderElement.classList.add('order-approved-success');
+        
+        // Find and update status text
+        const statusParagraphs = orderElement.querySelectorAll('p');
+        for (const paragraph of statusParagraphs) {
+          if (paragraph.textContent.includes("Status:")) {
+            paragraph.innerHTML = '<strong>Status:</strong> pending';
+            console.log('Updated status text');
+          }
+        }
+        
+        // Remove the "PENDING APPROVAL" label
+        // Create a specific style for this order element
+        const styleId = `order-${orderId}-fix`;
+        let styleElement = document.getElementById(styleId);
+        
+        if (!styleElement) {
+          styleElement = document.createElement('style');
+          styleElement.id = styleId;
+          document.head.appendChild(styleElement);
+        }
+        
+        styleElement.textContent = `
+          .order-item[data-order-id="${orderId}"]::before {
+            display: none !important;
+          }
+          .order-item[data-order-id="${orderId}"].order-pending-approval {
+            background-color: #ffffff !important;
+            border: 2px solid #ddd !important;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1) !important;
+          }
+          .order-item[data-order-id="${orderId}"] h3 {
+            color: #333 !important;
+          }
+          .order-item[data-order-id="${orderId}"] .order-total {
+            color: #333 !important;
+          }
+          .order-approved-success {
+            animation: successPulse 1s;
+          }
+          @keyframes successPulse {
+            0% { background-color: #e6ffe6; }
+            50% { background-color: #ccffcc; }
+            100% { background-color: #ffffff; }
+          }
+        `;
+        
+        console.log("Direct DOM manipulation complete - critical CSS override applied");
+        return true;
+      } catch (error) {
+        console.error("Error during direct DOM manipulation:", error);
+        return false;
+      }
+    },
+
+    // Completely bypass Vue for this critical update
+    handleApprovalBypassVue(orderId) {
+      // Force a direct manipulation of the DOM 
+      const fixed = this.forceFixPendingUI(orderId);
+      
+      // If direct manipulation succeeded, set a flag to prevent further attempts
+      if (fixed) {
+        // Store fixed orders in localStorage to avoid repeated fixes
+        const fixedOrders = JSON.parse(localStorage.getItem('fixedApprovedOrders') || '[]');
+        if (!fixedOrders.includes(orderId)) {
+          fixedOrders.push(orderId);
+          localStorage.setItem('fixedApprovedOrders', JSON.stringify(fixedOrders));
+        }
+        
+        // Show feedback to admin
+        this.notificationMessage = `The customer has APPROVED the order adjustments. Order ID: ${orderId}`;
+        this.notificationClass = "open-notification";
+        this.showNotification();
+      }
+      
+      // Force refresh orders after a short delay
+      setTimeout(() => {
+        this.fetchPendingOrders();
+      }, 1000);
+    },
   },
 
   mounted() {
-    const savedCafeStatus = localStorage.getItem('isCafeOpen');
-    if (savedCafeStatus !== null) {
-      this.isCafeOpen = JSON.parse(savedCafeStatus);
+    this.fetchPendingOrders();
+    // Set up automatic refresh every 60 seconds
+    this.refreshInterval = setInterval(() => {
+      this.fetchPendingOrders();
+    }, 60000);
+    
+    // Check localStorage for cafe status
+    const storedCafeStatus = localStorage.getItem('isCafeOpen');
+    if (storedCafeStatus !== null) {
+      this.isCafeOpen = storedCafeStatus === 'true';
     }
     
-    // Load orderReadyStatus from localStorage
+    // Load orderReadyStatus from localStorage if available
     const savedOrderReadyStatus = localStorage.getItem('orderReadyStatus');
-    if (savedOrderReadyStatus !== null) {
+    if (savedOrderReadyStatus) {
       this.orderReadyStatus = JSON.parse(savedOrderReadyStatus);
     }
     
-    // Initialize WebSocket first
-    this.initWebSocket();
+    // Event listener for customer approval/decline responses
+    window.addEventListener('storage', this.handleStorageEvent);
     
-    // Then fetch initial orders
-    this.fetchOrders();
+    // Connect to WebSocket
+    this.connectWebSocket();
+    
+    // Add a global document event listener for a custom event we'll dispatch on customer approval
+    document.addEventListener('customer-approval', (event) => {
+      if (event.detail && event.detail.orderId) {
+        console.log('Got customer-approval event at document level:', event.detail);
+        this.handleApprovalBypassVue(event.detail.orderId);
+      }
+    });
+    
+    // Dispatch a custom approval event if we have any approvals stored in localStorage
+    // This helps sync UI state on page load
+    const fixedOrders = JSON.parse(localStorage.getItem('fixedApprovedOrders') || '[]');
+    fixedOrders.forEach(orderId => {
+      setTimeout(() => {
+        const orderElement = document.querySelector(`.order-item[data-order-id="${orderId}"].order-pending-approval`);
+        if (orderElement) {
+          console.log(`Found previously fixed order #${orderId} still showing pending, re-fixing`);
+          this.forceFixPendingUI(orderId);
+        }
+      }, 1000);
+    });
   },
 
   beforeUnmount() {
-    // Close WebSocket connection
+    if (this.refreshInterval) {
+      clearInterval(this.refreshInterval);
+    }
+    
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+    }
+    
     if (this.ws) {
       this.ws.close();
     }
+    
+    // Remove event listeners
+    window.removeEventListener('storage', this.handleStorageEvent);
+    document.removeEventListener('customer-approval', this.handleApprovalBypassVue);
   }
 };
 </script>
@@ -1439,6 +2263,12 @@ export default {
   flex-direction: column;
   justify-content: space-between;
   height: auto;
+  transition: all 0.3s ease-in-out;
+}
+
+.order-item:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
 }
 
 .order-details h3 {
@@ -1532,66 +2362,6 @@ button.decline-btn {
 
 button.decline-btn:hover {
   background-color: #f17b7b;
-}
-
-/* Decline container styles */
-.decline-container {
-  width: 100%;
-  padding: 15px;
-  box-sizing: border-box; 
-  background: rgba(255, 255, 255, 0.95);
-  border-radius: 8px;
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
-  z-index: 1000;
-  text-align: center;
-  display: flex;
-  flex-direction: column;
-  margin-top: 10px;
-}
-
-.decline-container textarea {
-  width: 100%;
-  height: 80px;
-  border-radius: 5px;
-  border: 1px solid #ccc;
-  padding: 10px;
-  font-size: 14px;
-  margin-bottom: 10px;
-  resize: none;
-}
-
-.decline-buttons {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  margin-top: 10px;
-}
-
-.decline-submit-btn,
-.decline-cancel-btn {
-  padding: 8px 14px;
-  border-radius: 5px;
-  cursor: pointer;
-  border: none;
-  flex: 1;
-}
-
-.decline-submit-btn {
-  background-color: #f17b7b;
-  color: white;
-}
-
-.decline-submit-btn:hover {
-  background-color: #d05e5e;
-}
-
-.decline-cancel-btn {
-  background-color: #cccccc;
-  color: black;
-}
-
-.decline-cancel-btn:hover {
-  background-color: #999999;
 }
 
 /* Notification styles */
@@ -2201,4 +2971,239 @@ button.decline-btn:hover {
 .menu-button-header:hover {
   background: #b82d67;
 }
+
+/* New styles for decline modal and order highlighting */
+.order-declined-state {
+  background-color: #ffe6e6 !important;
+  border: 2px solid #ff0000 !important;
+}
+
+.order-pending-approval {
+  background-color: #ffe6e6 !important;
+  border: 2px solid #ff0000 !important;
+  box-shadow: 0 4px 10px rgba(255, 0, 0, 0.2) !important;
+  position: relative;
+  transition: all 0.5s ease-in-out;
+}
+
+.order-pending-approval::before {
+  content: 'PENDING APPROVAL';
+  position: absolute;
+  top: 0;
+  right: 0;
+  background-color: #ff0000;
+  color: white;
+  font-size: 12px;
+  font-weight: bold;
+  padding: 4px 8px;
+  border-bottom-left-radius: 8px;
+}
+
+.order-pending-approval h3 {
+  color: #ff0000 !important;
+}
+
+.order-pending-approval .order-details p {
+  color: #333 !important;
+}
+
+.order-pending-approval .order-total {
+  color: #ff0000 !important;
+  font-weight: bold;
+}
+
+.decline-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.decline-modal-content {
+  background-color: white;
+  border-radius: 8px;
+  width: 90%;
+  max-width: 600px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+}
+
+.decline-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 15px 20px;
+  border-bottom: 1px solid #eee;
+  background-color: #f8d2e4;
+}
+
+.decline-modal-header h3 {
+  margin: 0;
+  color: #d12f7a;
+}
+
+.decline-modal-body {
+  padding: 20px;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: bold;
+  color: #333;
+}
+
+.form-group textarea {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  resize: vertical;
+}
+
+.items-adjustment {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid #eee;
+  border-radius: 4px;
+  margin-bottom: 10px;
+}
+
+.item-adjust-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px;
+  border-bottom: 1px solid #eee;
+}
+
+.item-adjust-row:last-child {
+  border-bottom: none;
+}
+
+.item-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quantity-controls {
+  display: flex;
+  align-items: center;
+  margin: 0 10px;
+}
+
+.quantity-controls button {
+  width: 30px;
+  height: 30px;
+  border: 1px solid #ddd;
+  background-color: #f0f0f0;
+  border-radius: 4px;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.quantity-controls button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.quantity-controls input {
+  width: 50px;
+  text-align: center;
+  margin: 0 5px;
+  padding: 5px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.item-price {
+  min-width: 80px;
+  text-align: right;
+  font-weight: bold;
+}
+
+.adjusted-total {
+  text-align: right;
+  font-size: 16px;
+  margin-top: 10px;
+  color: #d12f7a;
+}
+
+.decline-modal-actions {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 20px;
+}
+
+.send-approval-btn {
+  background-color: #4caf50;
+  color: white;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: bold;
+}
+
+.confirm-decline-btn {
+  background-color: #f44336;
+  color: white;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: bold;
+}
+
+/* Animation for order approval transition */
+@keyframes orderApproved {
+  0% {
+    background-color: #ffe6e6;
+    border-color: #ff0000;
+    box-shadow: 0 4px 10px rgba(255, 0, 0, 0.2);
+  }
+  50% {
+    background-color: #e6ffe6;
+    border-color: #4caf50;
+    box-shadow: 0 4px 10px rgba(76, 175, 80, 0.3);
+  }
+  100% {
+    background-color: white;
+    border-color: #ddd;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+  }
+}
+
+.order-approved-animation {
+  animation: orderApproved 1.5s ease-in-out forwards;
+}
+
+/* Add the success animation styles */
+@keyframes successPulse {
+  0% { background-color: #fff; }
+  25% { background-color: #e6ffe6; }
+  50% { background-color: #ccffcc; }
+  75% { background-color: #e6ffe6; }
+  100% { background-color: #fff; }
+}
+
+.order-approved-success {
+  animation: successPulse 2s ease;
+  border: 2px solid #4CAF50 !important;
+  box-shadow: 0 4px 8px rgba(76, 175, 80, 0.3) !important;
+}
+
 </style>

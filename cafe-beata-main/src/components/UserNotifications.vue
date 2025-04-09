@@ -37,6 +37,16 @@
               <p class="order-details" v-if="extractOrderDetails(notification.message)">
                 {{ extractOrderDetails(notification.message) }}
               </p>
+              
+              <!-- Approval Buttons for notifications that require approval -->
+              <div v-if="notification.requiresApproval" class="approval-actions">
+                <button @click="approveAdjustment(notification, index)" class="approve-btn">
+                  Approve
+                </button>
+                <button @click="declineAdjustment(notification, index)" class="decline-btn">
+                  Decline
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -61,6 +71,15 @@
         </div>
       </div>
     </div>
+
+    <!-- New styles for loading and success messages -->
+    <div v-if="showLoadingMessage" class="loading-message">
+      {{ loadingMessage }}
+    </div>
+
+    <div v-if="showSuccessMessage" class="success-message-floating">
+      {{ successMessage }}
+    </div>
   </div>
 </template>
 
@@ -79,7 +98,11 @@ export default {
       isDarkMode: localStorage.getItem("darkMode") === "true",
       showMarkReadConfirmation: false,
       isPanelOpen: false,
-      unreadCount: 0
+      unreadCount: 0,
+      showLoadingMessage: false,
+      loadingMessage: '',
+      showSuccessMessage: false,
+      successMessage: ''
     };
   },
   computed: {
@@ -116,7 +139,27 @@ export default {
     
     // Format notification message to be more user-friendly
     formatNotificationMessage(message) {
-      // Remove the order details section to display separately
+      // Check if this is an order adjustment message
+      if (message.includes("adjust your order") || message.includes("review the adjusted order")) {
+        // For adjustments, extract and format the specific adjustment reasons
+        if (message.includes("The following adjustments were made:")) {
+          const beforeAdjustmentDetails = message.split("The following adjustments were made:")[0].trim();
+          const adjustmentDetails = message.split("The following adjustments were made:")[1].split("Please review")[0].trim();
+          
+          // Return a nicely formatted message
+          return `
+            <strong>${beforeAdjustmentDetails}</strong>
+            <div class="adjustment-details">
+              ${adjustmentDetails}
+            </div>
+          `;
+        } else {
+          // If no specific adjustments are listed, just show the main message
+          return message.split("Please review the adjusted order:")[0].trim();
+        }
+      }
+      
+      // Normal message formatting
       return message.replace(/(Order details:.*?Total: ₱\d+(\.\d{2})?)/, '')
                     .replace(/Your order/, 'Your order')
                     .replace(/\s{2,}/g, ' ') // Remove extra spaces
@@ -319,159 +362,276 @@ export default {
     },
 
     initWebSocket() {
+      // Use the same host as the API
       const wsUrl = `ws://${window.location.hostname}:8000/ws/orders`;
       
-      // Close existing connection if any
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.close();
+      // Only create a new connection if we don't have one already or if it's closed
+      if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+        console.log('Initializing WebSocket connection in UserNotifications...');
+        this.ws = new WebSocket(wsUrl);
+        
+        this.ws.onopen = () => {
+          console.log('WebSocket connected in UserNotifications');
+          this.wsConnected = true;
+          this.wsReconnectAttempts = 0; // Reset reconnect attempts on successful connection
+        };
+        
+        this.ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            console.log('WebSocket message received in UserNotifications:', data);
+            
+            const userName = localStorage.getItem("userName");
+            let notificationAdded = false;
+            let isForCurrentUser = false;
+            
+            // Pre-update badge to ensure UI is responsive
+            if (data.target_user === userName) {
+              isForCurrentUser = true;
+              this.unreadCount += 1;
+              eventBus.notificationsCount = this.unreadCount;
+              localStorage.setItem("unread_notifications", this.unreadCount);
+            }
+
+            // Process different message types
+            if (data.type === 'new_order') {
+              // Handle new order notification
+              if (data.order.customer_name === userName) {
+                console.log('Processing new order notification');
+                notificationAdded = this.addNewNotification({
+                  orderId: data.order.id,
+                  message: `Your order has been received! and is now being prepared. We will notify you as soon as it is ready for pickup. Estimated time 8-12 minutes.  Order details: ${this.formatItems(data.order.items)}. Total: ₱${this.calculateTotal(data.order.items)}`,
+                  timestamp: data.order.created_at,
+                  read: false
+                });
+                
+                // Show notification panel if it's not already open
+                if (!this.isPanelOpen && notificationAdded) {
+                  this.showNewNotificationAlert();
+                }
+              }
+            } else if (data.type === 'order_status_update') {
+              // Handle order status update notification
+              if (data.customer_name === userName) {
+                console.log('Processing order status update notification');
+                if (data.status === 'completed') {
+                  notificationAdded = this.addNewNotification({
+                    orderId: data.order_id,
+                    message: `Your order #${data.order_id} is now completed! Thank you for your order.`,
+                    timestamp: new Date().toISOString(),
+                    read: false
+                  });
+                  
+                  // Show notification panel if it's not already open
+                  if (!this.isPanelOpen && notificationAdded) {
+                    this.showNewNotificationAlert();
+                  }
+                } else if (data.status === 'declined') {
+                  notificationAdded = this.addNewNotification({
+                    orderId: data.order_id,
+                    message: `Your order #${data.order_id} has been declined. ${data.message || 'We apologize for any inconvenience.'}`,
+                    timestamp: new Date().toISOString(),
+                    read: false
+                  });
+                  
+                  // Show notification panel if it's not already open
+                  if (!this.isPanelOpen && notificationAdded) {
+                    this.showNewNotificationAlert();
+                  }
+                }
+              }
+            } else if (data.type === 'admin_notification') {
+              // Handle direct notifications from admin
+              const targetUser = data.target_user;
+              
+              // Only process the notification if it's for the current user
+              if (targetUser === userName) {
+                console.log('Processing user notification from admin');
+                
+                // Special handling for order adjustments (send for approval)
+                if (data.action === 'order_adjustment') {
+                  console.log('Processing order adjustment notification');
+                  
+                  // Make sure the adjustment notification has the requiresApproval flag
+                  const adjustmentNotification = {
+                    ...data.notification,
+                    requiresApproval: true,  // Explicitly set to true to show approve/decline buttons
+                    read: false
+                  };
+                  
+                  notificationAdded = this.addNewNotification(adjustmentNotification);
+                  
+                  // Open notification panel automatically to show the approval request
+                  if (notificationAdded) {
+                    this.showNewNotificationAlert();
+                    this.isPanelOpen = true;  // Auto-open the panel for important approvals
+                  }
+                } else {
+                  // Process regular notification
+                  const notification = {
+                    ...data.notification,
+                    read: false // Mark as unread by default
+                  };
+                  
+                  notificationAdded = this.addNewNotification(notification);
+                  
+                  // Show notification panel if it's not already open
+                  if (!this.isPanelOpen && notificationAdded) {
+                    this.showNewNotificationAlert();
+                  }
+                }
+              }
+            } else if (data.type === 'user_notification') {
+              // Handle direct notifications to the user
+              const targetUser = data.target_user;
+              
+              // Only process if it's for the current user
+              if (targetUser === userName) {
+                console.log('Processing user_notification:', data);
+                
+                // Handle different action types
+                if (data.action === 'order_declined') {
+                  console.log('Processing order_declined notification from user_notification type');
+                  
+                  // Extract notification data
+                  const declinedNotification = {
+                    ...data.notification,
+                    read: false
+                  };
+                  
+                  // Add the notification
+                  notificationAdded = this.addNewNotification(declinedNotification);
+                  
+                  // Show visual feedback and open panel
+                  if (notificationAdded) {
+                    this.showSuccessMessage = true;
+                    this.successMessage = `Order #${declinedNotification.orderId} was declined by the admin`;
+                    
+                    // Auto-remove the message after 3 seconds
+                    setTimeout(() => {
+                      this.showSuccessMessage = false;
+                    }, 3000);
+                    
+                    // Open notification panel automatically
+                    this.isPanelOpen = true;
+                    
+                    // Show notification alert
+                    this.showNewNotificationAlert();
+                    
+                    // Force refresh the notifications to ensure UI is updated
+                    this.fetchNotifications();
+                    
+                    // Force update UI
+                    this.$forceUpdate();
+                  }
+                } else if (data.action === 'order_adjustment') {
+                  // Already handled above, but kept for completeness
+                  console.log('Processing order_adjustment from user_notification type');
+                  
+                  const adjustmentNotification = {
+                    ...data.notification,
+                    requiresApproval: true,
+                    read: false
+                  };
+                  
+                  notificationAdded = this.addNewNotification(adjustmentNotification);
+                  
+                  if (notificationAdded) {
+                    this.showNewNotificationAlert();
+                    this.isPanelOpen = true;
+                  }
+                } else {
+                  // Handle other types of user notifications
+                  const notification = {
+                    ...data.notification,
+                    read: false
+                  };
+                  
+                  notificationAdded = this.addNewNotification(notification);
+                  
+                  if (notificationAdded && !this.isPanelOpen) {
+                    this.showNewNotificationAlert();
+                  }
+                }
+              }
+            } else if (data.type === 'order_declined') {
+              // Special handling for direct declined orders in real-time
+              if (data.customer_name === userName) {
+                console.log('Processing order declined notification in real-time:', data);
+                
+                // Create a clear notification for the user
+                const declinedNotification = {
+                  orderId: data.order_id,
+                  message: `Your order #${data.order_id} has been declined by the admin. ${data.reason || 'We apologize for any inconvenience.'}`,
+                  timestamp: new Date().toISOString(),
+                  read: false
+                };
+                
+                // Force add this notification
+                notificationAdded = this.addNewNotification(declinedNotification);
+                console.log('Decline notification added:', notificationAdded);
+                
+                // Show visual feedback
+                this.showSuccessMessage = true;
+                this.successMessage = `Order #${data.order_id} was declined by the admin`;
+                
+                // Auto-remove the message after 3 seconds
+                setTimeout(() => {
+                  this.showSuccessMessage = false;
+                }, 3000);
+                
+                // Open the notification panel automatically
+                this.isPanelOpen = true;
+                
+                // Show notification alert with sound
+                this.showNewNotificationAlert();
+                
+                // Force refresh the notifications from localStorage to ensure they appear
+                this.fetchNotifications();
+                
+                // Force update the UI
+                this.$forceUpdate();
+              }
+            }
+            
+            // If we pre-updated the badge but didn't actually add a notification,
+            // rollback the count
+            if (isForCurrentUser && !notificationAdded) {
+              console.log('Notification not added, rolling back badge count');
+              this.fetchAndRefreshBadge();
+            }
+          } catch (error) {
+            console.error('Error processing WebSocket message in UserNotifications:', error);
+          }
+        };
+        
+        this.ws.onclose = () => {
+          console.log('WebSocket disconnected in UserNotifications');
+          this.wsConnected = false;
+          
+          // Implement fixed reconnection attempt with a 5 second delay
+          // This matches the approach in NotificationsPage.vue
+          setTimeout(() => {
+            if (!this.wsConnected) {
+              console.log('Attempting to reconnect WebSocket in UserNotifications...');
+              this.initWebSocket();
+            }
+          }, 5000);
+        };
+        
+        this.ws.onerror = (error) => {
+          console.error('WebSocket error in UserNotifications:', error);
+          this.wsConnected = false;
+          
+          // Try to reconnect after error with the same approach as NotificationsPage
+          setTimeout(() => {
+            if (!this.wsConnected) {
+              console.log('Attempting to reconnect WebSocket after error in UserNotifications...');
+              this.initWebSocket();
+            }
+          }, 5000);
+        };
       }
-      
-      this.ws = new WebSocket(wsUrl);
-      
-      this.ws.onopen = () => {
-        console.log('WebSocket connected in UserNotifications');
-        this.wsConnected = true;
-        this.wsReconnectAttempts = 0; // Reset reconnect attempts on successful connection
-        
-        // Fetch notifications immediately after connecting and force badge update
-        this.fetchAndRefreshBadge();
-      };
-      
-      this.ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          console.log('UserNotifications - WebSocket message received:', data);
-          
-          // Get current user
-          const userName = localStorage.getItem("userName");
-          if (!userName) return; // Exit if no username
-          
-          // For real-time notification badge updates
-          const isForCurrentUser = 
-            (data.type === 'new_order' && data.order.customer_name === userName) ||
-            (data.type === 'order_status_update' && data.customer_name === userName) ||
-            (data.type === 'user_notification' && data.target_user === userName);
-          
-          // If this notification is for the current user, immediately update the badge UI
-          if (isForCurrentUser) {
-            console.log('Notification is for current user, pre-updating badge');
-            // Pre-update badge even before adding notification
-            this.unreadCount++;
-            eventBus.notificationsCount = this.unreadCount;
-            localStorage.setItem("unread_notifications", this.unreadCount);
-            
-            // Force UI update
-            this.$forceUpdate();
-          }
-          
-          let notificationAdded = false;
-          
-          // Handle different notification types
-          if (data.type === 'new_order') {
-            // Handle new order notification
-            if (data.order.customer_name === userName) {
-              console.log('Processing new order notification');
-              notificationAdded = this.addNewNotification({
-                orderId: data.order.id,
-                message: `Your order has been received! and is now being prepared. We will notify you as soon as it is ready for pickup. Estimated time 8-12 minutes.  Order details: ${this.formatItems(data.order.items)}. Total: ₱${this.calculateTotal(data.order.items)}`,
-                timestamp: data.order.created_at,
-                read: false
-              });
-              
-              // Show notification panel if it's not already open
-              if (!this.isPanelOpen && notificationAdded) {
-                this.showNewNotificationAlert();
-              }
-            }
-          } else if (data.type === 'order_status_update') {
-            // Handle order status update notification
-            if (data.customer_name === userName) {
-              console.log('Processing order status update notification');
-              if (data.status === 'completed') {
-                notificationAdded = this.addNewNotification({
-                  orderId: data.order_id,
-                  message: `Your order #${data.order_id} is now completed! Thank you for your order.`,
-                  timestamp: new Date().toISOString(),
-                  read: false
-                });
-                
-                // Show notification panel if it's not already open
-                if (!this.isPanelOpen && notificationAdded) {
-                  this.showNewNotificationAlert();
-                }
-              } else if (data.status === 'declined') {
-                notificationAdded = this.addNewNotification({
-                  orderId: data.order_id,
-                  message: `Your order #${data.order_id} has been declined. ${data.message || 'We apologize for any inconvenience.'}`,
-                  timestamp: new Date().toISOString(),
-                  read: false
-                });
-                
-                // Show notification panel if it's not already open
-                if (!this.isPanelOpen && notificationAdded) {
-                  this.showNewNotificationAlert();
-                }
-              }
-            }
-          } else if (data.type === 'user_notification') {
-            // Handle direct notifications from admin
-            const targetUser = data.target_user;
-            
-            // Only process the notification if it's for the current user
-            if (targetUser === userName) {
-              console.log('Processing user notification from admin');
-              
-              const notification = {
-                ...data.notification,
-                read: false // Mark as unread by default
-              };
-              
-              notificationAdded = this.addNewNotification(notification);
-              
-              // Show notification panel if it's not already open
-              if (!this.isPanelOpen && notificationAdded) {
-                this.showNewNotificationAlert();
-              }
-            }
-          }
-          
-          // If we pre-updated the badge but didn't actually add a notification,
-          // rollback the count
-          if (isForCurrentUser && !notificationAdded) {
-            console.log('Notification not added, rolling back badge count');
-            this.fetchAndRefreshBadge();
-          }
-        } catch (error) {
-          console.error('Error processing WebSocket message in UserNotifications:', error);
-        }
-      };
-      
-      this.ws.onclose = () => {
-        console.log('WebSocket disconnected in UserNotifications');
-        this.wsConnected = false;
-        
-        // Implement fixed reconnection attempt with a 5 second delay
-        // This matches the approach in DashboardPage.vue
-        setTimeout(() => {
-          if (!this.wsConnected) {
-            console.log('Attempting to reconnect WebSocket in UserNotifications...');
-            this.initWebSocket();
-          }
-        }, 5000);
-      };
-      
-      this.ws.onerror = (error) => {
-        console.error('WebSocket error in UserNotifications:', error);
-        this.wsConnected = false;
-        
-        // Try to reconnect after error with the same approach as DashboardPage
-        setTimeout(() => {
-          if (!this.wsConnected) {
-            console.log('Attempting to reconnect WebSocket after error in UserNotifications...');
-            this.initWebSocket();
-          }
-        }, 5000);
-      };
     },
 
     formatItems(items) {
@@ -579,6 +739,226 @@ export default {
         localStorage.setItem("unread_notifications", unreadCount);
         console.log("Badge refreshed with count:", unreadCount);
       });
+    },
+
+    // Approve order adjustment
+    approveAdjustment(notification, index) {
+      if (!notification.orderId) return;
+      
+      // Mark notification as read and show immediate UI feedback
+      notification.read = true;
+      notification.requiresApproval = false;
+      notification.message = notification.message + " [Approved]";
+      
+      // Show pending indicator
+      this.showLoadingMessage = true;
+      this.loadingMessage = 'Sending approval...';
+      
+      // Update the order in the database to remove the pending approval flag
+      fetch(`http://127.0.0.1:8000/orders/${notification.orderId}/update-items`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: notification.items, // Keep the adjusted items
+          status: "pending", // Keep as pending
+          isPendingApproval: false // Remove the pending approval flag
+        })
+      })
+      .then(response => {
+        if (!response.ok) {
+          throw new Error(`HTTP error! Status: ${response.status}`);
+        }
+        return response.json();
+      })
+      .then(() => {
+        console.log("Order approved successfully in database");
+        
+        // Send approval response notification back to admin
+        this.sendAdminNotification(
+          notification.orderId,
+          `The customer has APPROVED the order adjustments. Order ID: ${notification.orderId}`,
+          notification.items
+        );
+        
+        // Send an additional direct notification with customer_approval type for real-time updates
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({
+            type: 'customer_approval',
+            orderId: notification.orderId,
+            items: notification.items,
+            approved: true,
+            timestamp: new Date().toISOString()
+          }));
+        }
+        
+        // Update the user notifications in localStorage
+        const userName = localStorage.getItem("userName");
+        const userNotificationsKey = `user_notifications_${userName}`;
+        let notifications = JSON.parse(localStorage.getItem(userNotificationsKey)) || [];
+        
+        // Update the notification to show it's been approved
+        notifications[index] = {
+          ...notification,
+          requiresApproval: false,
+          message: notification.message
+        };
+        
+        localStorage.setItem(userNotificationsKey, JSON.stringify(notifications));
+        this.notifications = notifications;
+        
+        // Update the unread count
+        this.updateUnreadCount();
+        
+        // Remove loading message
+        this.showLoadingMessage = false;
+        
+        // Show success feedback
+        this.showSuccessMessage = true;
+        this.successMessage = 'Order adjustments approved!';
+        
+        // Auto-remove the success message after 3 seconds
+        setTimeout(() => {
+          this.showSuccessMessage = false;
+        }, 3000);
+      })
+      .catch(error => {
+        console.error("Error approving order adjustment:", error);
+        
+        // Remove loading message
+        this.showLoadingMessage = false;
+        
+        // Show error message
+        alert("Error approving order adjustment. Please try again.");
+        
+        // Revert UI changes on error
+        notification.requiresApproval = true;
+        notification.message = notification.message.replace(" [Approved]", "");
+        this.$forceUpdate(); // Force UI update
+      });
+    },
+    
+    // Decline order adjustment
+    declineAdjustment(notification, index) {
+      if (!notification.orderId) return;
+      
+      // Mark notification as being processed
+      notification.isProcessing = true;
+      this.$forceUpdate(); // Force UI update
+      
+      // Show pending indicator
+      this.showLoadingMessage = true;
+      this.loadingMessage = 'Declining order...';
+      
+      // Option 1: Decline the entire order
+      fetch(`http://127.0.0.1:8000/orders/${notification.orderId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          status: "declined",
+          items: notification.originalItems || notification.items
+        })
+      })
+      .then(response => {
+        if (!response.ok) {
+          throw new Error(`HTTP error! Status: ${response.status}`);
+        }
+        return response.json();
+      })
+      .then(() => {
+        console.log("Order declined successfully in database");
+        
+        // Send decline response notification back to admin
+        this.sendAdminNotification(
+          notification.orderId,
+          `The customer has DECLINED the order adjustments. Order ID: ${notification.orderId}`,
+          notification.originalItems || notification.items
+        );
+        
+        // Send an additional direct notification with customer_approval type for real-time updates
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({
+            type: 'customer_approval',
+            orderId: notification.orderId,
+            approved: false,
+            timestamp: new Date().toISOString()
+          }));
+        }
+        
+        // Remove the notification from the user's list
+        const userName = localStorage.getItem("userName");
+        const userNotificationsKey = `user_notifications_${userName}`;
+        let notifications = JSON.parse(localStorage.getItem(userNotificationsKey)) || [];
+        
+        // Remove this notification
+        notifications.splice(index, 1);
+        
+        localStorage.setItem(userNotificationsKey, JSON.stringify(notifications));
+        this.notifications = notifications;
+        
+        // Update the unread count
+        this.updateUnreadCount();
+        
+        // Hide loading message
+        this.showLoadingMessage = false;
+        
+        // Show success feedback
+        this.showSuccessMessage = true;
+        this.successMessage = 'Order adjustments declined successfully';
+        
+        // Auto-remove the success message after 3 seconds
+        setTimeout(() => {
+          this.showSuccessMessage = false;
+        }, 3000);
+      })
+      .catch(error => {
+        console.error("Error declining order adjustment:", error);
+        
+        // Hide loading message
+        this.showLoadingMessage = false;
+        
+        // Clear processing state
+        notification.isProcessing = false;
+        this.$forceUpdate();
+        
+        // Show error message
+        alert("Error declining order adjustment. Please try again.");
+      });
+    },
+    
+    // Helper to send notifications to admin
+    sendAdminNotification(orderId, message, items) {
+      // Create a notification for admin
+      const adminNotification = {
+        orderId,
+        customerName: "Admin", // Direct to admin
+        message,
+        timestamp: new Date().toISOString(),
+        items,
+        isAdminNotification: true
+      };
+      
+      // Save to admin notifications
+      const adminNotificationsKey = "user_notifications_Admin";
+      let adminNotifications = JSON.parse(localStorage.getItem(adminNotificationsKey)) || [];
+      adminNotifications.push(adminNotification);
+      localStorage.setItem(adminNotificationsKey, JSON.stringify(adminNotifications));
+      
+      // Send WebSocket notification if connected
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({
+          type: 'admin_notification',
+          action: 'adjustment_response',
+          notification: adminNotification
+        }));
+      }
+    },
+    
+    // Helper to update unread count
+    updateUnreadCount() {
+      const unreadCount = this.notifications.filter(n => !n.read).length;
+      this.unreadCount = unreadCount;
+      eventBus.notificationsCount = unreadCount;
+      localStorage.setItem("unread_notifications", unreadCount);
     },
   },
   created() {
@@ -1124,6 +1504,118 @@ export default {
   .notification-avatar img {
     width: 35px;
     height: 35px;
+  }
+}
+
+/* New styles for adjustment details */
+.adjustment-details {
+  background-color: #fff3f3;
+  border-left: 3px solid #ff6b6b;
+  padding: 8px 12px;
+  margin: 8px 0;
+  font-size: 13px;
+  border-radius: 4px;
+  color: #545454;
+  line-height: 1.4;
+}
+
+.dark-mode .adjustment-details {
+  background-color: #3d2828;
+  border-left: 3px solid #ff6b6b;
+  color: #e0e0e0;
+}
+
+/* Approval buttons styling */
+.approval-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.approve-btn, .decline-btn {
+  padding: 8px 16px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  font-weight: bold;
+  font-size: 14px;
+  transition: background-color 0.2s;
+}
+
+.approve-btn {
+  background-color: #4CAF50;
+  color: white;
+}
+
+.approve-btn:hover {
+  background-color: #3e8e41;
+}
+
+.decline-btn {
+  background-color: #f44336;
+  color: white;
+}
+
+.decline-btn:hover {
+  background-color: #d32f2f;
+}
+
+/* New styles for loading and success messages */
+.loading-message {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: #4a4a4a;
+  color: white;
+  padding: 10px 20px;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  z-index: 3000;
+  animation: fadeIn 0.3s ease;
+}
+
+.success-message-floating {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: #4CAF50;
+  color: white;
+  padding: 10px 20px;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  z-index: 3000;
+  animation: fadeInOut 3s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -20px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@keyframes fadeInOut {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -20px);
+  }
+  10% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  80% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -20px);
   }
 }
 </style>
